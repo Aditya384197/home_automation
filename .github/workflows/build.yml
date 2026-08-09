@@ -39,6 +39,6 @@ jobs:
     path: |
       build/*.bin
       build/bootloader/bootloader.bin
-      build/partition_table/partition-table.bin
+      build/partition_table/partition-table.bint
       build/*.elf
     if-no-files-found: error

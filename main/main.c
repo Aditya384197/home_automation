@@ -14,7 +14,7 @@
 #define WIFI_PASS      "Your_Password"
 #define MAX_STA_CONN   4
 
-// तीन रिले के GPIO पिन (आवश्यकतानुसार बदलें)
+// तीन रिले के GPIO पिन (ज़रूरत के हिसाब से बदलें)
 #define RELAY1_GPIO    16
 #define RELAY2_GPIO    17
 #define RELAY3_GPIO    18
@@ -22,7 +22,7 @@
 static const char *TAG = "HOME_AUTOMATION";
 static int relay_state[3] = {0, 0, 0};   // 0 = OFF, 1 = ON
 
-// HTML + CSS + JavaScript पेज
+// HTML + CSS + JavaScript वेब पेज
 static const char *html_page =
 "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>Home Automation</title><style>"
@@ -62,7 +62,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-// WiFi प्रारंभ करें
+// WiFi स्टेशन मोड शुरू करें
 static void wifi_init_sta(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -83,7 +83,8 @@ static void wifi_init_sta(void) {
         },
     };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+    // ⚠️ यहाँ बदलाव: ESP_IF_WIFI_STA की जगह WIFI_IF_STA का प्रयोग
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -97,7 +98,7 @@ static void gpio_init_relays(void) {
     gpio_set_direction(RELAY3_GPIO, GPIO_MODE_OUTPUT);
 }
 
-// सभी रिले को दिए गए स्टेट के अनुसार सेट करें
+// सभी रिले को मौजूदा स्टेट के अनुसार सेट करें
 static void apply_relay_states(void) {
     gpio_set_level(RELAY1_GPIO, relay_state[0]);
     gpio_set_level(RELAY2_GPIO, relay_state[1]);
@@ -144,7 +145,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// HTTP सर्वर प्रारंभ करें
+// HTTP सर्वर शुरू करें
 static void start_webserver(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -173,7 +174,7 @@ void app_main(void) {
     apply_relay_states();
 
     wifi_init_sta();
-    // WiFi कनेक्ट होने तक इंतज़ार (सिंपल तरीका)
+    // WiFi कनेक्ट होने का इंतज़ार
     vTaskDelay(pdMS_TO_TICKS(5000));
     start_webserver();
 }

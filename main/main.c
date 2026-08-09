@@ -30,14 +30,14 @@
 
 /* ---------------- STA Wi-Fi ---------------- */
 
-#define WIFI_STA_SSID       "YOUR_WIFI_SSID"
-#define WIFI_STA_PASSWORD   "YOUR_WIFI_PASSWORD"
+#define WIFI_STA_SSID       "Airtel_2.4GHz"
+#define WIFI_STA_PASSWORD   "Kgf@0987"
 
 
 /* ---------------- ESP32 Access Point ---------------- */
 
 #define WIFI_AP_SSID        "ESP32-SMART-HOME"
-#define WIFI_AP_PASSWORD    "YOUR_AP_PASSWORD"
+#define WIFI_AP_PASSWORD    "ak@12345"
 
 
 /*

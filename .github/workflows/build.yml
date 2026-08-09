@@ -16,6 +16,17 @@ jobs:
       - name: Build with ESP-IDF ${{ matrix.idf-version }}
         uses: espressif/esp-idf-ci-action@v1
         with:
-          idf_version: ${{ matrix.idf-version }}
+          esp_idf_version: ${{ matrix.idf-version }}   # ✅ 'idf_version' की जगह 'esp_idf_version'
           target: ${{ matrix.target }}
           path: '.'
+
+      # यह स्टेप जोड़ें ताकि बाइनरी फ़ाइलें डाउनलोड के लिए सेव हो जाएँ
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: home_automation_bin_${{ matrix.target }}_${{ matrix.idf-version }}
+          path: |
+            build/*.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/flash_args

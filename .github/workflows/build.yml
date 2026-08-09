@@ -1,16 +1,22 @@
 name: Build ESP32 Smart Home
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         idf-version: ["v5.1.2"]
         target: ["esp32"]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
@@ -19,7 +25,14 @@ jobs:
           target: ${{ matrix.target }}
           path: '.'
 
-      - name: Upload binaries
+      - name: Show build output
+        run: |
+          echo "=== Build directory ==="
+          find build -maxdepth 3 -type f \
+            \( -name "*.bin" -o -name "*.elf" \) \
+            -print
+
+      - name: Upload complete firmware
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.target }}-${{ matrix.idf-version }}
@@ -27,3 +40,5 @@ jobs:
             build/*.bin
             build/bootloader/bootloader.bin
             build/partition_table/partition-table.bin
+            build/*.elf
+          if-no-files-found: error

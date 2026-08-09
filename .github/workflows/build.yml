@@ -1,0 +1,21 @@
+name: Build ESP32 Home Automation
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        idf-version: ["v5.1.2"]
+        target: ["esp32"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF ${{ matrix.idf-version }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          idf_version: ${{ matrix.idf-version }}
+          target: ${{ matrix.target }}
+          path: '.'

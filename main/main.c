@@ -1,6 +1,13 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,2139 +20,719 @@
 #include "esp_err.h"
 #include "esp_netif.h"
 #include "esp_http_server.h"
-#include "esp_task_wdt.h"
-
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-
-#include "nvs.h"
+#include "esp_task_wdt.h"
 #include "nvs_flash.h"
-
+#include "nvs.h"
 #include "driver/gpio.h"
 
+#define TAG "OFFLINE_HOME"
 
-/* =========================================================
- *                       USER CONFIG
- * ========================================================= */
+/* ---------------- User hardware/configuration ---------------- */
 
-/* ---------------- STA Wi-Fi ---------------- */
+#define RELAY1_GPIO             16
+#define RELAY2_GPIO             17
+#define RELAY3_GPIO             18
 
-#define WIFI_STA_SSID       "Airtel_2.4GHz"
-#define WIFI_STA_PASSWORD   "Kgf@0987"
+/* Change to 0 if your relay board is active-low. */
+#define RELAY_ACTIVE_LEVEL      1
 
+#define DEFAULT_AP_SSID         "ESP32-SMART-HOME"
+#define DEFAULT_AP_PASSWORD     "ChangeMe123"
+#define DEFAULT_AP_CHANNEL      6
+#define AP_MAX_CONNECTIONS      4
 
-/* ---------------- ESP32 Access Point ---------------- */
+#define AP_IP_ADDR              "192.168.4.1"
+#define AP_GW_ADDR              "192.168.4.1"
+#define AP_NETMASK              "255.255.255.0"
 
-#define WIFI_AP_SSID        "ESP32-SMART-HOME"
-#define WIFI_AP_PASSWORD    "ak@12345"
+#define NVS_NAMESPACE           "home_cfg"
+#define NVS_KEY_RELAY_STATES    "relay"
+#define NVS_KEY_AP_SSID         "ap_ssid"
+#define NVS_KEY_AP_PASS         "ap_pass"
 
+#define WATCHDOG_TIMEOUT_MS     10000
+#define DNS_PORT                53
+#define DNS_STACK_SIZE          3072
+#define DNS_RX_SIZE             512
+#define OTA_BUFFER_SIZE         4096
 
-/*
- * AP password must normally be at least 8 characters.
- */
+#define MAX_AP_SSID_LEN         32
+#define MAX_AP_PASS_LEN         63
 
+/* ------------------------------------------------------------- */
 
-/* ---------------- Relay GPIO ---------------- */
-
-#define RELAY1_GPIO         GPIO_NUM_16
-#define RELAY2_GPIO         GPIO_NUM_17
-#define RELAY3_GPIO         GPIO_NUM_18
-
-
-/*
- * Relay board polarity:
- *
- * 1 = ACTIVE HIGH
- *     GPIO HIGH = Relay ON
- *
- * 0 = ACTIVE LOW
- *     GPIO LOW = Relay ON
- */
-
-#define RELAY_ACTIVE_LEVEL  1
-
-
-/* ---------------- NVS ---------------- */
-
-#define NVS_NAMESPACE       "relay_state"
-#define NVS_KEY             "states"
-
-
-/* ---------------- HTTP ---------------- */
-
-#define HTTP_PORT           80
-
-
-/* ---------------- OTA ---------------- */
-
-#define OTA_BUFFER_SIZE     4096
-
-
-/* ---------------- Watchdog ---------------- */
-
-#define WDT_TIMEOUT_MS      10000
-
-
-/* ========================================================= */
-
-static const char *TAG = "SMART_HOME";
-
-
-/*
- * Logical relay state:
- *
- * 0 = OFF
- * 1 = ON
- */
 static int relay_state[3] = {0, 0, 0};
+static SemaphoreHandle_t relay_mutex;
+static SemaphoreHandle_t storage_mutex;
+static SemaphoreHandle_t ota_mutex;
 
+static char ap_ssid[MAX_AP_SSID_LEN + 1] = DEFAULT_AP_SSID;
+static char ap_password[MAX_AP_PASS_LEN + 1] = DEFAULT_AP_PASSWORD;
 
-/*
- * Protects relay state and relay hardware operations.
- */
-static SemaphoreHandle_t relay_mutex = NULL;
+static TaskHandle_t dns_task_handle = NULL;
+static volatile bool ota_in_progress = false;
+static httpd_handle_t http_server = NULL;
 
+/* -------------------- Local Web UI -------------------- */
 
-/*
- * HTTP server handle.
- */
-static httpd_handle_t web_server = NULL;
-
-
-/* =========================================================
- *                    MAIN WEB PAGE
- * ========================================================= */
-
-static const char html_page[] =
-"<!DOCTYPE html>"
-"<html lang='en'>"
-"<head>"
-
-"<meta charset='UTF-8'>"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-
-"<title>Smart Home</title>"
-
+static const char *HTML_PAGE =
+"<!doctype html><html lang='en'><head>"
+"<meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
+"<meta name='theme-color' content='#111827'>"
+"<title>ESP32 Smart Home</title>"
 "<style>"
-
-"*{"
-"box-sizing:border-box;"
-"margin:0;"
-"padding:0;"
-"}"
-
-"body{"
-"font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"
-"'Segoe UI',sans-serif;"
-"background:#f3f5f7;"
-"color:#1f2933;"
-"min-height:100vh;"
-"display:flex;"
-"justify-content:center;"
-"padding:32px 16px;"
-"}"
-
-".container{"
-"width:100%;"
-"max-width:560px;"
-"}"
-
-".header{"
-"background:#fff;"
-"border:1px solid #e3e7eb;"
-"border-radius:18px;"
-"padding:24px;"
-"margin-bottom:16px;"
-"box-shadow:0 5px 20px rgba(20,30,40,.06);"
-"}"
-
-".header h1{"
-"font-size:25px;"
-"font-weight:700;"
-"letter-spacing:-.4px;"
-"}"
-
-".header p{"
-"margin-top:6px;"
-"font-size:14px;"
-"color:#6b7280;"
-"}"
-
-".card{"
-"background:#fff;"
-"border:1px solid #e3e7eb;"
-"border-radius:18px;"
-"padding:20px;"
-"margin-bottom:12px;"
-"display:flex;"
-"align-items:center;"
-"justify-content:space-between;"
-"box-shadow:0 4px 16px rgba(20,30,40,.045);"
-"transition:.2s ease;"
-"}"
-
-".card:hover{"
-"transform:translateY(-1px);"
-"box-shadow:0 7px 20px rgba(20,30,40,.08);"
-"}"
-
-".info{"
-"display:flex;"
-"align-items:center;"
-"gap:14px;"
-"}"
-
-".icon{"
-"width:42px;"
-"height:42px;"
-"border-radius:12px;"
-"background:#f1f4f6;"
-"display:flex;"
-"align-items:center;"
-"justify-content:center;"
-"font-size:20px;"
-"}"
-
-".name{"
-"font-size:16px;"
-"font-weight:600;"
-"}"
-
-".status{"
-"font-size:12px;"
-"color:#8a949e;"
-"margin-top:3px;"
-"}"
-
-".status.on{"
-"color:#16834a;"
-"}"
-
-".switch{"
-"position:relative;"
-"display:inline-block;"
-"width:54px;"
-"height:30px;"
-"}"
-
-".switch input{"
-"opacity:0;"
-"width:0;"
-"height:0;"
-"}"
-
-".slider{"
-"position:absolute;"
-"inset:0;"
-"background:#cbd1d7;"
-"border-radius:30px;"
-"cursor:pointer;"
-"transition:.22s ease;"
-"}"
-
-".slider:before{"
-"content:'';"
-"position:absolute;"
-"width:24px;"
-"height:24px;"
-"left:3px;"
-"top:3px;"
-"background:#fff;"
-"border-radius:50%;"
-"box-shadow:0 2px 5px rgba(0,0,0,.18);"
-"transition:.22s ease;"
-"}"
-
-"input:checked+.slider{"
-"background:#198754;"
-"}"
-
-"input:checked+.slider:before{"
-"transform:translateX(24px);"
-"}"
-
-".footer{"
-"text-align:center;"
-"font-size:12px;"
-"color:#9aa2aa;"
-"margin-top:20px;"
-"}"
-
-".ota-link{"
-"display:block;"
-"text-align:center;"
-"margin-top:15px;"
-"font-size:13px;"
-"color:#6b7280;"
-"text-decoration:none;"
-"}"
-
-".ota-link:hover{"
-"color:#198754;"
-"}"
-
-"@media(max-width:400px){"
-".header{padding:20px}"
-".card{padding:17px}"
-"}"
-
-"</style>"
-"</head>"
-
-"<body>"
-
-"<div class='container'>"
-
-"<div class='header'>"
-"<h1>Smart Home</h1>"
-"<p>Relay Control</p>"
-"</div>"
-
-
-"<div class='card'>"
-"<div class='info'>"
-"<div class='icon'>💡</div>"
-"<div>"
-"<div class='name'>Living Room Light</div>"
-"<div class='status' id='s1'>OFF</div>"
-"</div>"
-"</div>"
-
-"<label class='switch'>"
-"<input type='checkbox' id='r1' onchange='setRelay(1)'>"
-"<span class='slider'></span>"
-"</label>"
-"</div>"
-
-
-"<div class='card'>"
-"<div class='info'>"
-"<div class='icon'>🌀</div>"
-"<div>"
-"<div class='name'>Ceiling Fan</div>"
-"<div class='status' id='s2'>OFF</div>"
-"</div>"
-"</div>"
-
-"<label class='switch'>"
-"<input type='checkbox' id='r2' onchange='setRelay(2)'>"
-"<span class='slider'></span>"
-"</label>"
-"</div>"
-
-
-"<div class='card'>"
-"<div class='info'>"
-"<div class='icon'>🔌</div>"
-"<div>"
-"<div class='name'>Water Heater</div>"
-"<div class='status' id='s3'>OFF</div>"
-"</div>"
-"</div>"
-
-"<label class='switch'>"
-"<input type='checkbox' id='r3' onchange='setRelay(3)'>"
-"<span class='slider'></span>"
-"</label>"
-"</div>"
-
-
-"<a class='ota-link' href='/update'>Firmware Update</a>"
-
-"<div class='footer'>ESP32 Smart Home</div>"
-
-"</div>"
-
-
-"<script>"
-
-"let busy=false;"
-
-
-"function updateUI(){"
-
-"fetch('/status',{"
-"cache:'no-store',"
-"headers:{'Cache-Control':'no-cache'}"
-"})"
-
-".then(function(r){"
-"if(!r.ok)throw new Error('status');"
-"return r.json();"
-"})"
-
-".then(function(d){"
-
-"for(let i=1;i<=3;i++){"
-
-"let on=!!d['relay'+i];"
-
-"let checkbox=document.getElementById('r'+i);"
-"let status=document.getElementById('s'+i);"
-
-"checkbox.checked=on;"
-
-"status.textContent=on?'ON':'OFF';"
-
-"status.className='status'+(on?' on':'');"
-
-"}"
-
-"})"
-
-".catch(function(){})"
-
-"}"
-
-
-"function setRelay(n){"
-
-"if(busy)return;"
-
-"busy=true;"
-
-"let checkbox=document.getElementById('r'+n);"
-
-"let requestedState=checkbox.checked?1:0;"
-
-"fetch('/set?relay='+n+'&state='+requestedState,{"
-"method:'GET',"
-"cache:'no-store',"
-"headers:{'Cache-Control':'no-cache'}"
-"})"
-
-".then(function(r){"
-"if(!r.ok)throw new Error('set');"
-"return r.text();"
-"})"
-
-".then(function(){"
-"return updateUI();"
-"})"
-
-".catch(function(){"
-"return updateUI();"
-"})"
-
-".finally(function(){"
-"busy=false;"
-"})"
-
-"}"
-
-
-"window.addEventListener('load',function(){"
-"updateUI();"
-"});"
-
-"</script>"
-
-"</body>"
-"</html>";
-
-
-/* =========================================================
- *                       OTA WEB PAGE
- * ========================================================= */
-
-static const char ota_page[] =
-"<!DOCTYPE html>"
-"<html>"
-"<head>"
-
-"<meta charset='UTF-8'>"
-"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-
-"<title>ESP32 Firmware Update</title>"
-
-"<style>"
-
-"*{box-sizing:border-box}"
-
-"body{"
-"font-family:system-ui,-apple-system,sans-serif;"
-"background:#f3f5f7;"
-"color:#1f2933;"
-"min-height:100vh;"
-"display:flex;"
-"align-items:center;"
-"justify-content:center;"
-"padding:20px;"
-"}"
-
-".box{"
-"width:100%;"
-"max-width:480px;"
-"background:#fff;"
-"border:1px solid #e3e7eb;"
-"border-radius:18px;"
-"padding:25px;"
-"box-shadow:0 6px 25px rgba(0,0,0,.06);"
-"}"
-
-"h2{"
-"font-size:22px;"
-"margin-bottom:7px;"
-"}"
-
-"p{"
-"font-size:13px;"
-"color:#737b84;"
-"margin-bottom:20px;"
-"}"
-
-"input[type=file]{"
-"width:100%;"
-"padding:12px;"
-"border:1px solid #d8dde2;"
-"border-radius:10px;"
-"background:#fafbfc;"
-"}"
-
-"button{"
-"width:100%;"
-"margin-top:15px;"
-"padding:12px;"
-"border:0;"
-"border-radius:10px;"
-"background:#198754;"
-"color:#fff;"
-"font-size:15px;"
-"font-weight:600;"
-"cursor:pointer;"
-"}"
-
-"button:disabled{"
-"opacity:.55;"
-"cursor:not-allowed;"
-"}"
-
-"#msg{"
-"margin-top:15px;"
-"font-size:13px;"
-"color:#68727c;"
-"line-height:1.5;"
-"}"
-
-".back{"
-"display:block;"
-"margin-top:18px;"
-"text-align:center;"
-"font-size:13px;"
-"color:#68727c;"
-"text-decoration:none;"
-"}"
-
-"</style>"
-"</head>"
-
-"<body>"
-
-"<div class='box'>"
-
-"<h2>Firmware Update</h2>"
-
-"<p>Select the ESP32 firmware .bin file.</p>"
-
-"<input id='file' type='file' accept='.bin,application/octet-stream'>"
-
-"<button id='btn' onclick='upload()'>Update Firmware</button>"
-
-"<div id='msg'></div>"
-
-"<a class='back' href='/'>Back to Smart Home</a>"
-
-"</div>"
-
-
-"<script>"
-
-"function upload(){"
-
-"let input=document.getElementById('file');"
-"let button=document.getElementById('btn');"
-"let msg=document.getElementById('msg');"
-
-"if(!input.files.length){"
-"msg.textContent='Please select a firmware file.';"
-"return;"
-"}"
-
-"let file=input.files[0];"
-
-"if(!file.name.toLowerCase().endsWith('.bin')){"
-"msg.textContent='Please select a .bin firmware file.';"
-"return;"
-"}"
-
-"button.disabled=true;"
-
-"msg.textContent='Uploading firmware... Please do not power off the ESP32.';"
-
-"fetch('/update',{"
-"method:'POST',"
-"headers:{"
-"'Content-Type':'application/octet-stream',"
-"'X-Firmware-Name':file.name"
-"},"
-"body:file"
-"})"
-
-".then(function(r){"
-"return r.text().then(function(t){"
-"if(!r.ok)throw new Error(t||'Update failed');"
-"return t;"
-"});"
-"})"
-
-".then(function(t){"
-
-"msg.textContent=t+' Device is restarting...';"
-
-"})"
-
-".catch(function(e){"
-
-"msg.textContent='Update failed: '+e.message;"
-"button.disabled=false;"
-
-"});"
-
-"}"
-
-"</script>"
-
-"</body>"
-"</html>";
-
-
-/* =========================================================
- *                         RELAYS
- * ========================================================= */
-
-static int relay_output_level(int state)
+":root{--bg:#f3f5f7;--card:#fff;--text:#17202a;--muted:#697586;--line:#e5e7eb;--on:#168a4b;--off:#9aa3ad;--accent:#2563eb;--danger:#b42318}"
+"*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}"
+".wrap{width:min(680px,100%);margin:auto;padding:18px 14px 34px}.top{padding:8px 4px 18px}"
+"h1{font-size:25px;margin:0 0 5px}.sub{color:var(--muted);font-size:14px}"
+".card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 2px 10px rgba(15,23,42,.04)}"
+".row{display:flex;align-items:center;justify-content:space-between;gap:15px}.name{font-weight:650;font-size:17px}.state{font-size:13px;color:var(--muted);margin-top:4px}"
+".switch{position:relative;width:58px;height:32px;flex:none}.switch input{opacity:0;width:0;height:0}"
+".slider{position:absolute;inset:0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}"
+".slider:before{content:'';position:absolute;width:26px;height:26px;left:3px;top:3px;background:white;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}"
+"input:checked+.slider{background:var(--on)}input:checked+.slider:before{transform:translateX(26px)}"
+".bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}button,.file{border:1px solid var(--line);background:#fff;border-radius:10px;padding:10px 13px;font:inherit;cursor:pointer}"
+"button.primary{background:var(--accent);border-color:var(--accent);color:#fff}.msg{font-size:13px;margin-top:10px;color:var(--muted)}"
+"input[type=text],input[type=password],input[type=file]{width:100%;padding:11px;border:1px solid #d5dae0;border-radius:10px;background:#fff;font:inherit}"
+"label.field{display:block;font-size:13px;color:var(--muted);margin:13px 0 6px}.hidden{display:none}"
+".status{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}.dot{width:8px;height:8px;border-radius:50%;background:var(--on)}"
+"</style></head><body><main class='wrap'>"
+"<header class='top'><h1>Smart Home</h1><div class='sub'>Local offline control</div></header>"
+"<section id='controls'></section>"
+"<section class='card'><div class='row'><div><div class='name'>Firmware</div><div class='state'>Update locally from this device</div></div>"
+"<button onclick='show("+"\"ota\""+")'>OTA Update</button></div>"
+"<div id='ota' class='hidden'><label class='field'>Firmware .bin</label><input id='fw' type='file' accept='.bin,application/octet-stream'>"
+"<div class='bar'><button class='primary' onclick='uploadFirmware()'>Upload & Restart</button></div><div id='otamsg' class='msg'></div></div></section>"
+"<section class='card'><div class='row'><div><div class='name'>Access Point</div><div class='state'>ESP32 local network settings</div></div>"
+"<button onclick='show("+"\"settings\""+")'>Settings</button></div>"
+"<div id='settings' class='hidden'><label class='field'>SSID</label><input id='ssid' maxlength='32'>"
+"<label class='field'>Password (8-63 characters)</label><input id='pass' type='password' maxlength='63'>"
+"<div class='bar'><button class='primary' onclick='saveSettings()'>Save & Restart</button></div><div id='setmsg' class='msg'></div></div></section>"
+"<div class='status'><span class='dot'></span> ESP32 local AP</div>"
+"</main><script>"
+"const names=['Living Room Light','Ceiling Fan','Charging Socket'];"
+"function esc(s){return s.replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\"':'&quot;'}[c]))}"
+"function render(a){let h='';a.forEach((v,i)=>{h+=`<section class='card'><div class='row'><div><div class='name'>${names[i]}</div><div class='state' id='st${i}'>${v?'ON':'OFF'}</div></div><label class='switch'><input type='checkbox' id='r${i}' ${v?'checked':''} onchange='setRelay(${i},this.checked)'><span class='slider'></span></label></div></section>`});document.getElementById('controls').innerHTML=h}"
+"async function load(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();render([!!d.relay1,!!d.relay2,!!d.relay3])}catch(e){setTimeout(load,1200)}}"
+"async function setRelay(i,on){let el=document.getElementById('r'+i);el.disabled=true;try{let r=await fetch(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});if(!r.ok)throw 0;await load()}catch(e){el.checked=!on;alert('Relay command failed.')}finally{el.disabled=false}}"
+"function show(id){document.getElementById(id).classList.toggle('hidden')}"
+"async function saveSettings(){let s=document.getElementById('ssid').value,p=document.getElementById('pass').value,m=document.getElementById('setmsg');if(s.length<1||s.length>32||p.length<8||p.length>63){m.textContent='Invalid SSID or password.';return}m.textContent='Saving and restarting...';try{let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})});if(!r.ok)throw 0}catch(e){m.textContent='Connection lost. The AP may be restarting.'}}"
+"async function loadSettings(){try{let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();document.getElementById('ssid').value=d.ssid||''}catch(e){}}"
+"async function uploadFirmware(){let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg');if(!f){m.textContent='Select a .bin file first.';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device will restart after a successful update.'))return;m.textContent='Uploading... Do not disconnect.';try{let r=await fetch('/api/ota',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:f});let t=await r.text();m.textContent=t;if(r.ok){setTimeout(()=>location.reload(),8000)}}catch(e){m.textContent='Upload interrupted. Current firmware should remain active.'}}"
+"load();loadSettings();"
+"</script></body></html>";
+
+/* -------------------- NVS / persistence -------------------- */
+
+static bool valid_ssid(const char *s)
 {
-    if (state) {
-        return RELAY_ACTIVE_LEVEL;
-    }
-
-    return !RELAY_ACTIVE_LEVEL;
+    size_t n = strnlen(s, MAX_AP_SSID_LEN + 1);
+    return n >= 1 && n <= MAX_AP_SSID_LEN;
 }
 
-
-static gpio_num_t relay_gpio_from_index(int index)
+static bool valid_password(const char *s)
 {
-    switch(index) {
-
-        case 0:
-            return RELAY1_GPIO;
-
-        case 1:
-            return RELAY2_GPIO;
-
-        case 2:
-            return RELAY3_GPIO;
-
-        default:
-            return GPIO_NUM_NC;
-    }
+    size_t n = strnlen(s, MAX_AP_PASS_LEN + 1);
+    return n >= 8 && n <= MAX_AP_PASS_LEN;
 }
 
-
-static void relay_apply_one(int index)
+static void load_defaults(void)
 {
-    if (index < 0 || index > 2) {
+    strlcpy(ap_ssid, DEFAULT_AP_SSID, sizeof(ap_ssid));
+    strlcpy(ap_password, DEFAULT_AP_PASSWORD, sizeof(ap_password));
+    relay_state[0] = relay_state[1] = relay_state[2] = 0;
+}
+
+static void load_nvs(void)
+{
+    load_defaults();
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No existing config; using defaults");
         return;
     }
 
-    gpio_num_t pin =
-        relay_gpio_from_index(index);
-
-    gpio_set_level(
-        pin,
-        relay_output_level(relay_state[index]));
-}
-
-
-static void relay_apply_all(void)
-{
-    relay_apply_one(0);
-    relay_apply_one(1);
-    relay_apply_one(2);
-}
-
-
-static void relay_gpio_init(void)
-{
-    gpio_config_t io_conf = {
-        .pin_bit_mask =
-            (1ULL << RELAY1_GPIO) |
-            (1ULL << RELAY2_GPIO) |
-            (1ULL << RELAY3_GPIO),
-
-        .mode = GPIO_MODE_OUTPUT,
-
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-
-        .intr_type = GPIO_INTR_DISABLE
-    };
-
-    ESP_ERROR_CHECK(
-        gpio_config(&io_conf));
-
-
-    /*
-     * Always begin physically OFF.
-     *
-     * Saved state is applied only after
-     * NVS has been successfully read.
-     */
-
-    gpio_set_level(
-        RELAY1_GPIO,
-        relay_output_level(0));
-
-    gpio_set_level(
-        RELAY2_GPIO,
-        relay_output_level(0));
-
-    gpio_set_level(
-        RELAY3_GPIO,
-        relay_output_level(0));
-}
-
-
-/* =========================================================
- *                          NVS
- * ========================================================= */
-
-static esp_err_t relay_nvs_load(void)
-{
-    nvs_handle_t handle;
-
-    esp_err_t err =
-        nvs_open(
-            NVS_NAMESPACE,
-            NVS_READONLY,
-            &handle);
-
-    if (err != ESP_OK) {
-
-        ESP_LOGW(
-            TAG,
-            "No saved relay state. Using OFF.");
-
-        relay_state[0] = 0;
-        relay_state[1] = 0;
-        relay_state[2] = 0;
-
-        return ESP_OK;
-    }
-
-
-    uint8_t states[3] = {0, 0, 0};
-
-    size_t size =
-        sizeof(states);
-
-
-    err =
-        nvs_get_blob(
-            handle,
-            NVS_KEY,
-            states,
-            &size);
-
-
-    nvs_close(handle);
-
-
-    if (err != ESP_OK ||
-        size != sizeof(states)) {
-
-        ESP_LOGW(
-            TAG,
-            "Invalid relay state. Using OFF.");
-
-        relay_state[0] = 0;
-        relay_state[1] = 0;
-        relay_state[2] = 0;
-
-        return ESP_OK;
-    }
-
-
-    relay_state[0] =
-        states[0] ? 1 : 0;
-
-    relay_state[1] =
-        states[1] ? 1 : 0;
-
-    relay_state[2] =
-        states[2] ? 1 : 0;
-
-
-    ESP_LOGI(
-        TAG,
-        "Restored relay state: %d %d %d",
-        relay_state[0],
-        relay_state[1],
-        relay_state[2]);
-
-
-    return ESP_OK;
-}
-
-
-static esp_err_t relay_nvs_save_locked(void)
-{
-    /*
-     * Caller must hold relay_mutex.
-     */
-
-    nvs_handle_t handle;
-
-    esp_err_t err =
-        nvs_open(
-            NVS_NAMESPACE,
-            NVS_READWRITE,
-            &handle);
-
-    if (err != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "NVS open failed: %s",
-            esp_err_to_name(err));
-
-        return err;
-    }
-
-
     uint8_t states[3];
+    size_t sz = sizeof(states);
+    if (nvs_get_blob(h, NVS_KEY_RELAY_STATES, states, &sz) == ESP_OK && sz == sizeof(states)) {
+        for (int i = 0; i < 3; ++i) relay_state[i] = states[i] ? 1 : 0;
+    }
 
-    states[0] =
-        relay_state[0] ? 1 : 0;
+    char tmp_ssid[MAX_AP_SSID_LEN + 1] = {0};
+    sz = sizeof(tmp_ssid);
+    if (nvs_get_str(h, NVS_KEY_AP_SSID, tmp_ssid, &sz) == ESP_OK && valid_ssid(tmp_ssid)) {
+        strlcpy(ap_ssid, tmp_ssid, sizeof(ap_ssid));
+    }
 
-    states[1] =
-        relay_state[1] ? 1 : 0;
+    char tmp_pass[MAX_AP_PASS_LEN + 1] = {0};
+    sz = sizeof(tmp_pass);
+    if (nvs_get_str(h, NVS_KEY_AP_PASS, tmp_pass, &sz) == ESP_OK && valid_password(tmp_pass)) {
+        strlcpy(ap_password, tmp_pass, sizeof(ap_password));
+    }
 
-    states[2] =
-        relay_state[2] ? 1 : 0;
+    nvs_close(h);
+    ESP_LOGI(TAG, "Restored relay states: %d %d %d", relay_state[0], relay_state[1], relay_state[2]);
+}
 
+static esp_err_t save_relay_states(void)
+{
+    uint8_t states[3];
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    for (int i = 0; i < 3; ++i) states[i] = relay_state[i];
+    xSemaphoreGive(relay_mutex);
 
-    err =
-        nvs_set_blob(
-            handle,
-            NVS_KEY,
-            states,
-            sizeof(states));
-
-
+    xSemaphoreTake(storage_mutex, portMAX_DELAY);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err == ESP_OK) {
-
-        err =
-            nvs_commit(handle);
+        err = nvs_set_blob(h, NVS_KEY_RELAY_STATES, states, sizeof(states));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
     }
+    xSemaphoreGive(storage_mutex);
 
-
-    nvs_close(handle);
-
-
-    if (err != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "NVS save failed: %s",
-            esp_err_to_name(err));
-    }
-
-
+    if (err != ESP_OK) ESP_LOGE(TAG, "Relay NVS save failed: %s", esp_err_to_name(err));
     return err;
 }
 
-
-/* =========================================================
- *                         WIFI
- * ========================================================= */
-
-static void wifi_event_handler(
-    void *arg,
-    esp_event_base_t event_base,
-    int32_t event_id,
-    void *event_data)
+static esp_err_t save_ap_settings(const char *ssid, const char *password)
 {
-    if (event_base == WIFI_EVENT) {
+    xSemaphoreTake(storage_mutex, portMAX_DELAY);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_AP_SSID, ssid);
+        if (err == ESP_OK) err = nvs_set_str(h, NVS_KEY_AP_PASS, password);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    xSemaphoreGive(storage_mutex);
 
-        switch (event_id) {
+    if (err == ESP_OK) {
+        strlcpy(ap_ssid, ssid, sizeof(ap_ssid));
+        strlcpy(ap_password, password, sizeof(ap_password));
+    }
+    return err;
+}
 
-            case WIFI_EVENT_STA_START:
+/* -------------------- GPIO / relay -------------------- */
 
-                ESP_LOGI(
-                    TAG,
-                    "STA started.");
+static int relay_output_level(int logical_state)
+{
+    return logical_state ? RELAY_ACTIVE_LEVEL : !RELAY_ACTIVE_LEVEL;
+}
 
-                esp_err_t err =
-                    esp_wifi_connect();
+static void apply_all_relays(void)
+{
+    int s[3];
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    memcpy(s, relay_state, sizeof(s));
+    xSemaphoreGive(relay_mutex);
 
-                if (err != ESP_OK) {
+    gpio_set_level(RELAY1_GPIO, relay_output_level(s[0]));
+    gpio_set_level(RELAY2_GPIO, relay_output_level(s[1]));
+    gpio_set_level(RELAY3_GPIO, relay_output_level(s[2]));
+}
 
-                    ESP_LOGW(
-                        TAG,
-                        "Initial Wi-Fi connect: %s",
-                        esp_err_to_name(err));
-                }
+static void init_relays(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << RELAY1_GPIO) | (1ULL << RELAY2_GPIO) | (1ULL << RELAY3_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
 
-                break;
+    /* Safe physical OFF before restoring persistent state. */
+    gpio_set_level(RELAY1_GPIO, relay_output_level(0));
+    gpio_set_level(RELAY2_GPIO, relay_output_level(0));
+    gpio_set_level(RELAY3_GPIO, relay_output_level(0));
+}
 
+/* -------------------- Wi-Fi AP -------------------- */
 
-            case WIFI_EVENT_STA_DISCONNECTED:
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (base == WIFI_EVENT) {
+        if (id == WIFI_EVENT_AP_START) ESP_LOGI(TAG, "AP started");
+        else if (id == WIFI_EVENT_AP_STACONNECTED) ESP_LOGI(TAG, "Client connected");
+        else if (id == WIFI_EVENT_AP_STADISCONNECTED) ESP_LOGI(TAG, "Client disconnected");
+    }
+}
 
-                ESP_LOGW(
-                    TAG,
-                    "Wi-Fi disconnected. Reconnecting...");
+static void wifi_init_ap(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-                /*
-                 * AP remains alive because we use APSTA.
-                 */
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+    if (!ap_netif) ESP_ERROR_CHECK(ESP_FAIL);
 
-                esp_wifi_connect();
+    esp_netif_ip_info_t ip_info;
+    ESP_ERROR_CHECK(esp_netif_get_ip_info(ap_netif, &ip_info));
+    ip4addr_aton(AP_IP_ADDR, &ip_info.ip);
+    ip4addr_aton(AP_GW_ADDR, &ip_info.gw);
+    ip4addr_aton(AP_NETMASK, &ip_info.netmask);
+    ESP_ERROR_CHECK(esp_netif_dhcps_stop(ap_netif));
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
+    ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
 
-                break;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    esp_event_handler_instance_t instance_any;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler, NULL, &instance_any));
 
-            case WIFI_EVENT_AP_START:
+    wifi_config_t ap = {0};
+    strlcpy((char *)ap.ap.ssid, ap_ssid, sizeof(ap.ap.ssid));
+    strlcpy((char *)ap.ap.password, ap_password, sizeof(ap.ap.password));
+    ap.ap.ssid_len = strlen(ap_ssid);
+    ap.ap.channel = DEFAULT_AP_CHANNEL;
+    ap.ap.max_connection = AP_MAX_CONNECTIONS;
+    ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    ap.ap.pmf_cfg.required = false;
+    ap.ap.pmf_cfg.capable = true;
 
-                ESP_LOGI(
-                    TAG,
-                    "ESP32 AP started: %s",
-                    WIFI_AP_SSID);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
+    ESP_ERROR_CHECK(esp_wifi_start());
 
-                break;
+    ESP_LOGI(TAG, "AP SSID: %s", ap_ssid);
+    ESP_LOGI(TAG, "AP IP: %s", AP_IP_ADDR);
+}
 
+/* -------------------- Local DNS captive portal -------------------- */
 
-            default:
-                break;
+static int find_question_end(const uint8_t *buf, int len)
+{
+    if (len < 17) return -1;
+    int p = 12;
+    int jumps = 0;
+    while (p < len && jumps++ < 64) {
+        uint8_t l = buf[p++];
+        if (l == 0) {
+            if (p + 4 > len) return -1;
+            return p + 4;
+        }
+        if ((l & 0xC0) != 0 || l > 63 || p + l > len) return -1;
+        p += l;
+    }
+    return -1;
+}
+
+static int build_dns_answer(uint8_t *out, int out_cap, const uint8_t *query, int qlen)
+{
+    int qend = find_question_end(query, qlen);
+    if (qend < 0 || qend + 16 > out_cap || qend > qlen) return -1;
+
+    memcpy(out, query, qend);
+    out[2] = 0x81; out[3] = 0x80; /* standard response, no error */
+    out[4] = 0x00; out[5] = 0x00; /* QDCOUNT = 0 in our response copy */
+    out[6] = 0x00; out[7] = 0x01; /* ANCOUNT = 1 */
+    out[8] = out[9] = out[10] = out[11] = 0;
+
+    /* Keep the original question. DNS header QDCOUNT should be 1. */
+    out[4] = 0x00; out[5] = 0x01;
+
+    int p = qend;
+    out[p++] = 0xC0; out[p++] = 0x0C; /* name pointer */
+    out[p++] = 0x00; out[p++] = 0x01; /* A */
+    out[p++] = 0x00; out[p++] = 0x01; /* IN */
+    out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x3C; /* TTL 60 */
+    out[p++] = 0x00; out[p++] = 0x04;
+    out[p++] = 192; out[p++] = 168; out[p++] = 4; out[p++] = 1;
+    return p;
+}
+
+static void dns_task(void *arg)
+{
+    uint8_t rx[DNS_RX_SIZE];
+    uint8_t tx[DNS_RX_SIZE + 32];
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "DNS socket failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(DNS_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "DNS bind failed: errno=%d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    ESP_LOGI(TAG, "Local DNS started on UDP/53");
+
+    while (1) {
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+        int n = recvfrom(sock, rx, sizeof(rx), 0, (struct sockaddr *)&from, &from_len);
+        if (n <= 0) continue;
+
+        int out_len = build_dns_answer(tx, sizeof(tx), rx, n);
+        if (out_len > 0) {
+            sendto(sock, tx, out_len, 0, (struct sockaddr *)&from, from_len);
         }
     }
-
-
-    else if (
-        event_base == IP_EVENT &&
-        event_id == IP_EVENT_STA_GOT_IP) {
-
-        ip_event_got_ip_t *event =
-            (ip_event_got_ip_t *)event_data;
-
-        ESP_LOGI(
-            TAG,
-            "STA IP: " IPSTR,
-            IP2STR(&event->ip_info.ip));
-    }
 }
 
+/* -------------------- HTTP helpers -------------------- */
 
-static void wifi_init(void)
+static esp_err_t send_json(httpd_req_t *req, const char *json, const char *status)
 {
-    ESP_ERROR_CHECK(
-        esp_netif_init());
-
-
-    ESP_ERROR_CHECK(
-        esp_event_loop_create_default());
-
-
-    esp_netif_t *sta_netif =
-        esp_netif_create_default_wifi_sta();
-
-    esp_netif_t *ap_netif =
-        esp_netif_create_default_wifi_ap();
-
-
-    if (sta_netif == NULL ||
-        ap_netif == NULL) {
-
-        ESP_LOGE(
-            TAG,
-            "Failed to create network interfaces.");
-
-        esp_restart();
-    }
-
-
-    wifi_init_config_t cfg =
-        WIFI_INIT_CONFIG_DEFAULT();
-
-
-    ESP_ERROR_CHECK(
-        esp_wifi_init(&cfg));
-
-
-    ESP_ERROR_CHECK(
-        esp_event_handler_register(
-            WIFI_EVENT,
-            ESP_EVENT_ANY_ID,
-            &wifi_event_handler,
-            NULL));
-
-
-    ESP_ERROR_CHECK(
-        esp_event_handler_register(
-            IP_EVENT,
-            IP_EVENT_STA_GOT_IP,
-            &wifi_event_handler,
-            NULL));
-
-
-    /* ---------------- STA ---------------- */
-
-    wifi_config_t sta_config = {0};
-
-
-    strncpy(
-        (char *)sta_config.sta.ssid,
-        WIFI_STA_SSID,
-        sizeof(sta_config.sta.ssid) - 1);
-
-
-    strncpy(
-        (char *)sta_config.sta.password,
-        WIFI_STA_PASSWORD,
-        sizeof(sta_config.sta.password) - 1);
-
-
-    /*
-     * Do not lock to a channel.
-     *
-     * Channel = 0 means unknown/current channel.
-     */
-
-    sta_config.sta.channel = 0;
-
-
-    /*
-     * Scan all channels.
-     *
-     * This helps when the router changes channel.
-     */
-
-    sta_config.sta.scan_method =
-        WIFI_ALL_CHANNEL_SCAN;
-
-
-    /*
-     * Internal connection retries.
-     */
-
-    sta_config.sta.failure_retry_cnt = 5;
-
-
-    sta_config.sta.threshold.authmode =
-        WIFI_AUTH_WPA2_PSK;
-
-
-    sta_config.sta.pmf_cfg.capable = true;
-    sta_config.sta.pmf_cfg.required = false;
-
-
-    /* ---------------- AP ---------------- */
-
-    wifi_config_t ap_config = {0};
-
-
-    strncpy(
-        (char *)ap_config.ap.ssid,
-        WIFI_AP_SSID,
-        sizeof(ap_config.ap.ssid) - 1);
-
-
-    strncpy(
-        (char *)ap_config.ap.password,
-        WIFI_AP_PASSWORD,
-        sizeof(ap_config.ap.password) - 1);
-
-
-    ap_config.ap.ssid_len =
-        strlen(WIFI_AP_SSID);
-
-
-    /*
-     * This channel is only the initial AP channel.
-     *
-     * In APSTA mode ESP32 has one radio, therefore
-     * the SoftAP channel follows the STA channel
-     * when STA is connected.
-     */
-
-    ap_config.ap.channel = 1;
-
-
-    ap_config.ap.max_connection = 4;
-
-
-    ap_config.ap.authmode =
-        WIFI_AUTH_WPA2_PSK;
-
-
-    /* ---------------- Start ---------------- */
-
-    ESP_ERROR_CHECK(
-        esp_wifi_set_mode(WIFI_MODE_APSTA));
-
-
-    ESP_ERROR_CHECK(
-        esp_wifi_set_config(
-            WIFI_IF_STA,
-            &sta_config));
-
-
-    ESP_ERROR_CHECK(
-        esp_wifi_set_config(
-            WIFI_IF_AP,
-            &ap_config));
-
-
-    ESP_ERROR_CHECK(
-        esp_wifi_start());
-
-
-    ESP_LOGI(
-        TAG,
-        "Wi-Fi AP+STA started.");
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
-
-/* =========================================================
- *                     HTTP ROOT
- * ========================================================= */
-
-static esp_err_t root_handler(
-    httpd_req_t *req)
+static esp_err_t redirect_to_root(httpd_req_t *req)
 {
-    httpd_resp_set_type(
-        req,
-        "text/html; charset=utf-8");
-
-
-    httpd_resp_set_hdr(
-        req,
-        "Cache-Control",
-        "no-store, no-cache, must-revalidate, max-age=0");
-
-
-    return httpd_resp_send(
-        req,
-        html_page,
-        HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, NULL, 0);
 }
 
-
-/* =========================================================
- *                     HTTP STATUS
- * ========================================================= */
-
-static esp_err_t status_handler(
-    httpd_req_t *req)
+static esp_err_t root_handler(httpd_req_t *req)
 {
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, HTML_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t status_handler(httpd_req_t *req)
+{
+    int s[3];
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    memcpy(s, relay_state, sizeof(s));
+    xSemaphoreGive(relay_mutex);
+
     char json[128];
-
-
-    xSemaphoreTake(
-        relay_mutex,
-        portMAX_DELAY);
-
-
-    int r1 = relay_state[0];
-    int r2 = relay_state[1];
-    int r3 = relay_state[2];
-
-
-    xSemaphoreGive(
-        relay_mutex);
-
-
-    snprintf(
-        json,
-        sizeof(json),
-        "{\"relay1\":%d,\"relay2\":%d,\"relay3\":%d}",
-        r1,
-        r2,
-        r3);
-
-
-    httpd_resp_set_type(
-        req,
-        "application/json");
-
-
-    httpd_resp_set_hdr(
-        req,
-        "Cache-Control",
-        "no-store, no-cache, must-revalidate, max-age=0");
-
-
-    return httpd_resp_send(
-        req,
-        json,
-        HTTPD_RESP_USE_STRLEN);
+    snprintf(json, sizeof(json), "{\"relay1\":%d,\"relay2\":%d,\"relay3\":%d}", s[0], s[1], s[2]);
+    return send_json(req, json, "200 OK");
 }
 
-
-/* =========================================================
- *                     HTTP SET RELAY
- * ========================================================= */
-
-static esp_err_t set_handler(
-    httpd_req_t *req)
+static esp_err_t relay_handler(httpd_req_t *req)
 {
+    if (ota_in_progress) return send_json(req, "{\"error\":\"OTA in progress\"}", "409 Conflict");
+
     char query[128];
+    char value[20];
 
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+        return send_json(req, "{\"error\":\"missing query\"}", "400 Bad Request");
 
-    if (
-        httpd_req_get_url_query_str(
-            req,
-            query,
-            sizeof(query)) != ESP_OK) {
+    if (httpd_query_key_value(query, "relay", value, sizeof(value)) != ESP_OK)
+        return send_json(req, "{\"error\":\"relay\"}", "400 Bad Request");
+    char *end = NULL;
+    long relay = strtol(value, &end, 10);
+    if (*value == '\0' || *end != '\0' || relay < 1 || relay > 3)
+        return send_json(req, "{\"error\":\"relay\"}", "400 Bad Request");
 
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Missing parameters");
+    if (httpd_query_key_value(query, "state", value, sizeof(value)) != ESP_OK)
+        return send_json(req, "{\"error\":\"state\"}", "400 Bad Request");
+    end = NULL;
+    long state = strtol(value, &end, 10);
+    if (*value == '\0' || *end != '\0' || (state != 0 && state != 1))
+        return send_json(req, "{\"error\":\"state\"}", "400 Bad Request");
 
-        return ESP_FAIL;
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    relay_state[relay - 1] = (int)state;
+    gpio_num_t pins[3] = {RELAY1_GPIO, RELAY2_GPIO, RELAY3_GPIO};
+    gpio_set_level(pins[relay - 1], relay_output_level((int)state));
+    xSemaphoreGive(relay_mutex);
+
+    /* Persist only actual user changes. */
+    esp_err_t err = save_relay_states();
+    if (err != ESP_OK) {
+        return send_json(req, "{\"error\":\"state applied but not saved\"}", "500 Internal Server Error");
     }
 
-
-    char relay_str[8] = {0};
-    char state_str[8] = {0};
-
-
-    if (
-        httpd_query_key_value(
-            query,
-            "relay",
-            relay_str,
-            sizeof(relay_str)) != ESP_OK) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid relay");
-
-        return ESP_FAIL;
-    }
-
-
-    if (
-        httpd_query_key_value(
-            query,
-            "state",
-            state_str,
-            sizeof(state_str)) != ESP_OK) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid state");
-
-        return ESP_FAIL;
-    }
-
-
-    char *endptr;
-
-
-    long relay =
-        strtol(
-            relay_str,
-            &endptr,
-            10);
-
-
-    if (
-        *endptr != '\0' ||
-        relay < 1 ||
-        relay > 3) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid relay");
-
-        return ESP_FAIL;
-    }
-
-
-    long state =
-        strtol(
-            state_str,
-            &endptr,
-            10);
-
-
-    if (
-        *endptr != '\0' ||
-        (state != 0 && state != 1)) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid state");
-
-        return ESP_FAIL;
-    }
-
-
-    xSemaphoreTake(
-        relay_mutex,
-        portMAX_DELAY);
-
-
-    int index =
-        (int)relay - 1;
-
-
-    /*
-     * Do not write flash if the state
-     * is already exactly the requested state.
-     */
-
-    bool changed =
-        (relay_state[index] != state);
-
-
-    if (changed) {
-
-        relay_state[index] =
-            (int)state;
-
-
-        /*
-         * Physical relay changes immediately.
-         */
-
-        relay_apply_one(index);
-
-
-        /*
-         * Persist the new state.
-         */
-
-        esp_err_t save_err =
-            relay_nvs_save_locked();
-
-
-        xSemaphoreGive(
-            relay_mutex);
-
-
-        if (save_err != ESP_OK) {
-
-            /*
-             * Important:
-             *
-             * The physical relay has already changed.
-             * If persistence failed, report failure so the
-             * browser knows the persistent save was not confirmed.
-             */
-
-            httpd_resp_send_err(
-                req,
-                HTTPD_500_INTERNAL_SERVER_ERROR,
-                "Relay changed but state save failed");
-
-            return ESP_FAIL;
-        }
-    }
-
-    else {
-
-        xSemaphoreGive(
-            relay_mutex);
-    }
-
-
-    httpd_resp_set_type(
-        req,
-        "text/plain");
-
-
-    return httpd_resp_sendstr(
-        req,
-        "OK");
+    return send_json(req, "{\"ok\":true}", "200 OK");
 }
 
-
-/* =========================================================
- *                     OTA PAGE
- * ========================================================= */
-
-static esp_err_t ota_page_handler(
-    httpd_req_t *req)
+static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(
-        req,
-        "text/html; charset=utf-8");
-
-
-    httpd_resp_set_hdr(
-        req,
-        "Cache-Control",
-        "no-store");
-
-
-    return httpd_resp_send(
-        req,
-        ota_page,
-        HTTPD_RESP_USE_STRLEN);
+    char json[160];
+    snprintf(json, sizeof(json), "{\"ssid\":\"%s\"}", ap_ssid);
+    return send_json(req, json, "200 OK");
 }
 
-
-/* =========================================================
- *                     OTA UPLOAD
- *
- * IMPORTANT:
- * Browser sends RAW .BIN bytes.
- *
- * No multipart/form-data.
- * ========================================================= */
-
-static esp_err_t ota_upload_handler(
-    httpd_req_t *req)
+static bool json_extract_string(const char *body, const char *key, char *out, size_t out_sz)
 {
-    /*
-     * Only raw binary firmware is accepted.
-     */
+    char needle[40];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(body, needle);
+    if (!p) return false;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return false;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < out_sz) {
+        if (*p == '\\' && p[1]) return false; /* reject escapes for simplicity */
+        out[i++] = *p++;
+    }
+    if (*p != '"') return false;
+    out[i] = '\0';
+    return true;
+}
 
-    size_t content_type_len =
-        httpd_req_get_hdr_value_len(
-            req,
-            "Content-Type");
+static esp_err_t settings_post_handler(httpd_req_t *req)
+{
+    if (ota_in_progress) return send_json(req, "{\"error\":\"OTA in progress\"}", "409 Conflict");
+    if (req->content_len <= 0 || req->content_len > 1024)
+        return send_json(req, "{\"error\":\"invalid body\"}", "400 Bad Request");
 
+    char body[1025];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) return ESP_FAIL;
+        received += (size_t)n;
+    }
+    body[received] = '\0';
 
-    if (content_type_len == 0 ||
-        content_type_len >= 64) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid Content-Type");
-
-        return ESP_FAIL;
+    char ssid[MAX_AP_SSID_LEN + 1];
+    char pass[MAX_AP_PASS_LEN + 1];
+    if (!json_extract_string(body, "ssid", ssid, sizeof(ssid)) ||
+        !json_extract_string(body, "password", pass, sizeof(pass)) ||
+        !valid_ssid(ssid) || !valid_password(pass)) {
+        return send_json(req, "{\"error\":\"invalid SSID/password\"}", "400 Bad Request");
     }
 
+    if (save_ap_settings(ssid, pass) != ESP_OK)
+        return send_json(req, "{\"error\":\"save failed\"}", "500 Internal Server Error");
 
-    char content_type[64];
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"restarting\":true}");
 
-
-    if (
-        httpd_req_get_hdr_value_str(
-            req,
-            "Content-Type",
-            content_type,
-            sizeof(content_type)) != ESP_OK) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid Content-Type");
-
-        return ESP_FAIL;
-    }
-
-
-    if (
-        strncmp(
-            content_type,
-            "application/octet-stream",
-            strlen("application/octet-stream")) != 0) {
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Firmware must be raw binary");
-
-        return ESP_FAIL;
-    }
-
-
-    const esp_partition_t *update_partition =
-        esp_ota_get_next_update_partition(NULL);
-
-
-    if (update_partition == NULL) {
-
-        ESP_LOGE(
-            TAG,
-            "No OTA partition available.");
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_500_INTERNAL_SERVER_ERROR,
-            "No OTA partition");
-
-        return ESP_FAIL;
-    }
-
-
-    /*
-     * Request content length is the actual .bin size
-     * because the browser sends raw binary.
-     */
-
-    if (
-        req->content_len <= 0 ||
-        (size_t)req->content_len >
-            update_partition->size) {
-
-        ESP_LOGE(
-            TAG,
-            "Invalid firmware size: %d",
-            req->content_len);
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid firmware size");
-
-        return ESP_FAIL;
-    }
-
-
-    ESP_LOGI(
-        TAG,
-        "OTA started. Size: %d bytes",
-        req->content_len);
-
-
-    esp_ota_handle_t ota_handle = 0;
-
-
-    esp_err_t err =
-        esp_ota_begin(
-            update_partition,
-            OTA_SIZE_UNKNOWN,
-            &ota_handle);
-
-
-    if (err != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "esp_ota_begin failed: %s",
-            esp_err_to_name(err));
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_500_INTERNAL_SERVER_ERROR,
-            "OTA begin failed");
-
-        return ESP_FAIL;
-    }
-
-
-    uint8_t *buffer =
-        malloc(OTA_BUFFER_SIZE);
-
-
-    if (buffer == NULL) {
-
-        esp_ota_abort(
-            ota_handle);
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_500_INTERNAL_SERVER_ERROR,
-            "Memory allocation failed");
-
-        return ESP_FAIL;
-    }
-
-
-    int remaining =
-        req->content_len;
-
-
-    while (remaining > 0) {
-
-        int to_receive =
-            remaining > OTA_BUFFER_SIZE
-                ? OTA_BUFFER_SIZE
-                : remaining;
-
-
-        int received =
-            httpd_req_recv(
-                req,
-                (char *)buffer,
-                to_receive);
-
-
-        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
-        }
-
-
-        if (received <= 0) {
-
-            ESP_LOGE(
-                TAG,
-                "OTA receive failed.");
-
-            free(buffer);
-
-            esp_ota_abort(
-                ota_handle);
-
-            httpd_resp_send_err(
-                req,
-                HTTPD_500_INTERNAL_SERVER_ERROR,
-                "OTA receive failed");
-
-            return ESP_FAIL;
-        }
-
-
-        err =
-            esp_ota_write(
-                ota_handle,
-                buffer,
-                received);
-
-
-        if (err != ESP_OK) {
-
-            ESP_LOGE(
-                TAG,
-                "OTA write failed: %s",
-                esp_err_to_name(err));
-
-            free(buffer);
-
-            esp_ota_abort(
-                ota_handle);
-
-            httpd_resp_send_err(
-                req,
-                HTTPD_500_INTERNAL_SERVER_ERROR,
-                "OTA write failed");
-
-            return ESP_FAIL;
-        }
-
-
-        remaining -= received;
-    }
-
-
-    free(buffer);
-
-
-    /*
-     * Final image validation.
-     */
-
-    err =
-        esp_ota_end(
-            ota_handle);
-
-
-    if (err != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "OTA image validation failed: %s",
-            esp_err_to_name(err));
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_400_BAD_REQUEST,
-            "Invalid firmware image");
-
-        return ESP_FAIL;
-    }
-
-
-    /*
-     * Make new image bootable.
-     */
-
-    err =
-        esp_ota_set_boot_partition(
-            update_partition);
-
-
-    if (err != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "Failed to set boot partition: %s",
-            esp_err_to_name(err));
-
-        httpd_resp_send_err(
-            req,
-            HTTPD_500_INTERNAL_SERVER_ERROR,
-            "Failed to set boot partition");
-
-        return ESP_FAIL;
-    }
-
-
-    ESP_LOGI(
-        TAG,
-        "OTA successful. Restarting...");
-
-
-    httpd_resp_set_type(
-        req,
-        "text/plain");
-
-
-    httpd_resp_sendstr(
-        req,
-        "Firmware update successful. Restarting...");
-
-
-    /*
-     * Give HTTP response a moment to leave the socket.
-     */
-
-    vTaskDelay(
-        pdMS_TO_TICKS(1000));
-
-
+    vTaskDelay(pdMS_TO_TICKS(700));
     esp_restart();
-
-
     return ESP_OK;
 }
 
+/* -------------------- OTA -------------------- */
 
-/* =========================================================
- *                   OTA ROLLBACK CHECK
- * ========================================================= */
-
-static void ota_check_and_confirm(void)
+static esp_err_t ota_handler(httpd_req_t *req)
 {
-    const esp_partition_t *running =
-        esp_ota_get_running_partition();
+    if (ota_in_progress) return send_json(req, "{\"error\":\"OTA busy\"}", "409 Conflict");
 
+    if (req->content_len < 1024)
+        return send_json(req, "{\"error\":\"firmware too small\"}", "400 Bad Request");
 
-    if (running == NULL) {
-        return;
+    ota_in_progress = true;
+    xSemaphoreTake(ota_mutex, portMAX_DELAY);
+
+    esp_err_t err = ESP_OK;
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        err = ESP_FAIL;
+        goto ota_fail;
     }
 
+    esp_ota_handle_t ota_handle = 0;
+    err = esp_ota_begin(update_partition, req->content_len, &ota_handle);
+    if (err != ESP_OK) goto ota_fail;
 
-    esp_ota_img_states_t state;
+    uint8_t *buf = malloc(OTA_BUFFER_SIZE);
+    if (!buf) {
+        esp_ota_abort(ota_handle);
+        err = ESP_ERR_NO_MEM;
+        goto ota_fail;
+    }
 
-
-    esp_err_t err =
-        esp_ota_get_state_partition(
-            running,
-            &state);
-
-
-    if (err == ESP_OK &&
-        state == ESP_OTA_IMG_PENDING_VERIFY) {
-
-        /*
-         * Basic self-test:
-         *
-         * - Application reached app_main
-         * - NVS initialized
-         * - GPIO initialized
-         * - Relay state restored
-         * - Wi-Fi initialization reached
-         *
-         * Therefore the firmware has passed the
-         * basic boot/runtime test.
-         */
-
-        ESP_LOGI(
-            TAG,
-            "OTA image pending verification.");
-
-        err =
-            esp_ota_mark_app_valid_cancel_rollback();
-
-
-        if (err == ESP_OK) {
-
-            ESP_LOGI(
-                TAG,
-                "OTA image marked VALID.");
+    size_t remaining = req->content_len;
+    while (remaining > 0) {
+        size_t want = remaining > OTA_BUFFER_SIZE ? OTA_BUFFER_SIZE : remaining;
+        int n = httpd_req_recv(req, (char *)buf, want);
+        if (n <= 0) {
+            free(buf);
+            esp_ota_abort(ota_handle);
+            err = ESP_FAIL;
+            goto ota_fail;
         }
 
-        else {
-
-            ESP_LOGE(
-                TAG,
-                "Failed to mark OTA image valid: %s",
-                esp_err_to_name(err));
+        err = esp_ota_write(ota_handle, buf, n);
+        if (err != ESP_OK) {
+            free(buf);
+            esp_ota_abort(ota_handle);
+            goto ota_fail;
         }
+        remaining -= (size_t)n;
     }
+
+    free(buf);
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) goto ota_fail;
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) goto ota_fail;
+
+    xSemaphoreGive(ota_mutex);
+    ota_in_progress = false;
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, "OTA successful. Restarting...");
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    esp_restart();
+    return ESP_OK;
+
+ota_fail:
+    xSemaphoreGive(ota_mutex);
+    ota_in_progress = false;
+
+    ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(err));
+    char msg[128];
+    snprintf(msg, sizeof(msg), "{\"error\":\"OTA failed\",\"code\":%d}", (int)err);
+    return send_json(req, msg, "500 Internal Server Error");
 }
 
-
-/* =========================================================
- *                       HTTP SERVER
- * ========================================================= */
-
-static void start_webserver(void)
+/* Common captive portal probe paths. */
+static esp_err_t captive_handler(httpd_req_t *req)
 {
-    httpd_config_t config =
-        HTTPD_DEFAULT_CONFIG();
+    return redirect_to_root(req);
+}
 
+/* -------------------- HTTP server -------------------- */
 
-    config.server_port =
-        HTTP_PORT;
+static void start_http_server(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.ctrl_port = 32768;
+    config.max_uri_handlers = 16;
+    config.stack_size = 6144;
+    config.recv_wait_timeout = 10;
+    config.send_wait_timeout = 10;
+    config.lru_purge_enable = true;
 
-
-    config.max_uri_handlers =
-        8;
-
-
-    config.stack_size =
-        8192;
-
-
-    config.recv_wait_timeout =
-        10;
-
-
-    config.send_wait_timeout =
-        10;
-
-
-    config.lru_purge_enable =
-        true;
-
-
-    if (
-        httpd_start(
-            &web_server,
-            &config) != ESP_OK) {
-
-        ESP_LOGE(
-            TAG,
-            "HTTP server failed.");
-
+    if (httpd_start(&http_server, &config) != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP server start failed");
         return;
     }
 
+    httpd_uri_t root = {.uri="/", .method=HTTP_GET, .handler=root_handler};
+    httpd_uri_t status = {.uri="/api/status", .method=HTTP_GET, .handler=status_handler};
+    httpd_uri_t relay = {.uri="/api/relay", .method=HTTP_GET, .handler=relay_handler};
+    httpd_uri_t settings_get = {.uri="/api/settings", .method=HTTP_GET, .handler=settings_get_handler};
+    httpd_uri_t settings_post = {.uri="/api/settings", .method=HTTP_POST, .handler=settings_post_handler};
+    httpd_uri_t ota = {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler};
 
-    /* ---------- Root ---------- */
+    httpd_uri_t c1 = {.uri="/generate_204", .method=HTTP_GET, .handler=captive_handler};
+    httpd_uri_t c2 = {.uri="/hotspot-detect.html", .method=HTTP_GET, .handler=captive_handler};
+    httpd_uri_t c3 = {.uri="/connecttest.txt", .method=HTTP_GET, .handler=captive_handler};
+    httpd_uri_t c4 = {.uri="/ncsi.txt", .method=HTTP_GET, .handler=captive_handler};
+    httpd_uri_t c5 = {.uri="/connectivitycheck.gstatic.com/generate_204", .method=HTTP_GET, .handler=captive_handler};
+    httpd_uri_t c6 = {.uri="/success.txt", .method=HTTP_GET, .handler=captive_handler};
 
-    httpd_uri_t root_uri = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = root_handler,
-        .user_ctx = NULL
-    };
+    httpd_register_uri_handler(http_server, &root);
+    httpd_register_uri_handler(http_server, &status);
+    httpd_register_uri_handler(http_server, &relay);
+    httpd_register_uri_handler(http_server, &settings_get);
+    httpd_register_uri_handler(http_server, &settings_post);
+    httpd_register_uri_handler(http_server, &ota);
+    httpd_register_uri_handler(http_server, &c1);
+    httpd_register_uri_handler(http_server, &c2);
+    httpd_register_uri_handler(http_server, &c3);
+    httpd_register_uri_handler(http_server, &c4);
+    httpd_register_uri_handler(http_server, &c5);
+    httpd_register_uri_handler(http_server, &c6);
 
-
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(
-            web_server,
-            &root_uri));
-
-
-    /* ---------- Status ---------- */
-
-    httpd_uri_t status_uri = {
-        .uri = "/status",
-        .method = HTTP_GET,
-        .handler = status_handler,
-        .user_ctx = NULL
-    };
-
-
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(
-            web_server,
-            &status_uri));
-
-
-    /* ---------- Relay ---------- */
-
-    httpd_uri_t set_uri = {
-        .uri = "/set",
-        .method = HTTP_GET,
-        .handler = set_handler,
-        .user_ctx = NULL
-    };
-
-
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(
-            web_server,
-            &set_uri));
-
-
-    /* ---------- OTA page ---------- */
-
-    httpd_uri_t ota_page_uri = {
-        .uri = "/update",
-        .method = HTTP_GET,
-        .handler = ota_page_handler,
-        .user_ctx = NULL
-    };
-
-
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(
-            web_server,
-            &ota_page_uri));
-
-
-    /* ---------- OTA upload ---------- */
-
-    httpd_uri_t ota_upload_uri = {
-        .uri = "/update",
-        .method = HTTP_POST,
-        .handler = ota_upload_handler,
-        .user_ctx = NULL
-    };
-
-
-    ESP_ERROR_CHECK(
-        httpd_register_uri_handler(
-            web_server,
-            &ota_upload_uri));
-
-
-    ESP_LOGI(
-        TAG,
-        "HTTP server started on port %d.",
-        HTTP_PORT);
+    ESP_LOGI(TAG, "HTTP server ready");
 }
 
+/* -------------------- Watchdog -------------------- */
 
-/* =========================================================
- *                     WATCHDOG
- * ========================================================= */
-
-static void watchdog_init(void)
+static void watchdog_keepalive_task(void *arg)
 {
-    esp_task_wdt_config_t config = {
+    /* This task is intentionally simple. Idle-task TWDT monitoring is also
+       enabled by the configuration below; this task protects its own loop. */
+    esp_task_wdt_add(NULL);
 
-        .timeout_ms =
-            WDT_TIMEOUT_MS,
-
-        /*
-         * Watch both CPU idle tasks.
-         * This detects CPU starvation / tasks that
-         * run without yielding.
-         */
-
-        .idle_core_mask =
-            (1U << portNUM_PROCESSORS) - 1U,
-
-        /*
-         * A watchdog timeout should result in panic,
-         * which uses the configured system panic
-         * recovery path.
-         */
-
-        .trigger_panic = true
-    };
-
-
-    /*
-     * ESP-IDF may already initialize TWDT through
-     * menuconfig.
-     *
-     * If already initialized, reconfigure it.
-     */
-
-    esp_err_t err =
-        esp_task_wdt_init(&config);
-
-
-    if (err == ESP_ERR_INVALID_STATE) {
-
-        err =
-            esp_task_wdt_reconfigure(
-                &config);
+    while (1) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
-
-
-    if (err != ESP_OK) {
-
-        ESP_LOGW(
-            TAG,
-            "TWDT configuration unavailable: %s",
-            esp_err_to_name(err));
-
-        /*
-         * Do not destroy the application simply because
-         * optional watchdog configuration failed.
-         *
-         * ESP-IDF's built-in watchdog configuration may
-         * already be active through sdkconfig.
-         */
-
-        return;
-    }
-
-
-    ESP_LOGI(
-        TAG,
-        "Task watchdog configured: %d ms",
-        WDT_TIMEOUT_MS);
 }
 
-
-/* =========================================================
- *                          APP MAIN
- * ========================================================= */
+/* -------------------- app_main -------------------- */
 
 void app_main(void)
 {
-    ESP_LOGI(
-        TAG,
-        "====================================");
-
-    ESP_LOGI(
-        TAG,
-        "ESP32 SMART HOME STARTING");
-
-    ESP_LOGI(
-        TAG,
-        "====================================");
-
-
-    /* -----------------------------------------------------
-     * NVS
-     * ----------------------------------------------------- */
-
-    esp_err_t ret =
-        nvs_flash_init();
-
-
-    if (
-        ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-
-        ESP_LOGW(
-            TAG,
-            "NVS requires erase/reinitialization.");
-
-        ESP_ERROR_CHECK(
-            nvs_flash_erase());
-
-
-        /*
-         * IMPORTANT:
-         *
-         * Store the result of the second initialization.
-         */
-
-        ret =
-            nvs_flash_init();
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
-
-
     ESP_ERROR_CHECK(ret);
 
-
-    /* -----------------------------------------------------
-     * Mutex
-     * ----------------------------------------------------- */
-
-    relay_mutex =
-        xSemaphoreCreateMutex();
-
-
-    if (relay_mutex == NULL) {
-
-        ESP_LOGE(
-            TAG,
-            "Relay mutex creation failed.");
-
-        esp_restart();
+    relay_mutex = xSemaphoreCreateMutex();
+    storage_mutex = xSemaphoreCreateMutex();
+    ota_mutex = xSemaphoreCreateMutex();
+    if (!relay_mutex || !storage_mutex || !ota_mutex) {
+        ESP_LOGE(TAG, "Mutex allocation failed");
+        abort();
     }
 
+    load_nvs();
+    init_relays();
+    apply_all_relays();
 
-    /* -----------------------------------------------------
-     * GPIO
-     * ----------------------------------------------------- */
+    /* Configure TWDT with idle-task monitoring. */
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = WATCHDOG_TIMEOUT_MS,
+        .idle_core_mask = (1U << portNUM_PROCESSORS) - 1U,
+        .trigger_panic = true
+    };
+    ret = esp_task_wdt_init(&wdt_config);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(ret);
+    }
 
-    relay_gpio_init();
+    xTaskCreate(watchdog_keepalive_task, "wdt_keepalive", 2048, NULL, 1, NULL);
 
+    wifi_init_ap();
 
-    /* -----------------------------------------------------
-     * Restore persistent state
-     * ----------------------------------------------------- */
+    BaseType_t ok = xTaskCreate(dns_task, "local_dns", DNS_STACK_SIZE, NULL, 3, &dns_task_handle);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "DNS task creation failed");
+    }
 
-    xSemaphoreTake(
-        relay_mutex,
-        portMAX_DELAY);
+    start_http_server();
 
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Offline Smart Home ready");
+    ESP_LOGI(TAG, "Control:  http://%s/", AP_IP_ADDR);
+    ESP_LOGI(TAG, "AP only: no STA, no Internet");
+    ESP_LOGI(TAG, "========================================");
 
-    relay_nvs_load();
-
-
-    /*
-     * Apply saved state.
-     */
-
-    relay_apply_all();
-
-
-    xSemaphoreGive(
-        relay_mutex);
-
-
-    /* -----------------------------------------------------
-     * Watchdog
-     * ----------------------------------------------------- */
-
-    watchdog_init();
-
-
-    /* -----------------------------------------------------
-     * OTA rollback verification
-     * ----------------------------------------------------- */
-
-    ota_check_and_confirm();
-
-
-    /* -----------------------------------------------------
-     * Wi-Fi
-     * ----------------------------------------------------- */
-
-    wifi_init();
-
-
-    /* -----------------------------------------------------
-     * HTTP
-     * ----------------------------------------------------- */
-
-    start_webserver();
-
-
-    /* -----------------------------------------------------
-     * READY
-     * ----------------------------------------------------- */
-
-    ESP_LOGI(
-        TAG,
-        "====================================");
-
-    ESP_LOGI(
-        TAG,
-        "SYSTEM READY");
-
-    ESP_LOGI(
-        TAG,
-        "Relay states: %d %d %d",
-        relay_state[0],
-        relay_state[1],
-        relay_state[2]);
-
-    ESP_LOGI(
-        TAG,
-        "====================================");
+    /* Keep app_main alive as a lightweight supervisor. */
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
 }

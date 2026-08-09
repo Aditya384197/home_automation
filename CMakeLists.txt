@@ -1,3 +1,4 @@
 cmake_minimum_required(VERSION 3.16)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(home_automation)
+project(offline_smart_home)

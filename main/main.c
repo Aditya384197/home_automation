@@ -67,6 +67,7 @@
 #define MAX_AP_SSID_LEN         32
 #define MAX_AP_PASS_LEN         63
 #define MAX_RELAY_NAME_LEN      31
+#define OTA_UPDATE_PASSWORD     "OTA@ESP32#2026"
 
 /* ------------------------------------------------------------- */
 
@@ -185,11 +186,11 @@ static const char *HTML_PAGE =
 "function openRelayConfig(){document.getElementById('relayConfig').classList.remove('hidden');document.getElementById('relaymsg').textContent='';renderRelayConfig();}"
 "function renderRelayConfig(){let h='';relayCfg.forEach((r,i)=>{let optional=i>=3;h+=`<div class='relay-config-item'><div class='relay-config-head'><div><div class='relay-number'>Relay ${i+1}</div><div class='relay-gpio'>GPIO ${r.gpio}${optional?' · Optional':''}</div></div>${optional?`<label class='small-switch'><input type='checkbox' id='en${i}' ${r.enabled?'checked':''} onchange='relayEnableChanged(${i})'><span class='small-slider'></span></label>`:''}</div><label class='field'>Name</label><input type='text' id='rn${i}' maxlength='31' value='${esc(r.name)}' ${optional&&!r.enabled?'disabled':''}></div>`});document.getElementById('relayConfigList').innerHTML=h}"
 "function relayEnableChanged(i){let en=document.getElementById('en'+i).checked;document.getElementById('rn'+i).disabled=!en}"
-"async function saveRelayConfig(){let m=document.getElementById('relaymsg');let cfg=[];for(let i=0;i<5;i++){let enabled=i<3?true:document.getElementById('en'+i).checked;let name=document.getElementById('rn'+i).value.trim();if(!name)name='Relay '+(i+1);if(name.length>31){m.textContent='Relay name is too long.';return}cfg.push({enabled,name})}m.textContent='Saving...';try{let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({relays:cfg})});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;m.textContent='Saved successfully.';renderRelayConfig();await load()}catch(e){m.textContent='Could not save relay configuration.'}}"
+"async function saveRelayConfig(){let m=document.getElementById('relaymsg');let body={};for(let i=0;i<5;i++){let enabled=i<3?true:document.getElementById('en'+i).checked;let name=document.getElementById('rn'+i).value.trim();if(!name)name='Relay '+(i+1);if(name.length>31){m.textContent='Relay name is too long.';return}body['r'+(i+1)+'_enabled']=enabled;body['r'+(i+1)+'_name']=name}m.textContent='Saving...';try{let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'save failed');relayCfg=d.config||relayCfg;m.textContent='Saved successfully.';renderRelayConfig();await load()}catch(e){m.textContent='Could not save relay configuration: '+(e.message||'request failed')}}"
 "async function saveSettings(){let s=document.getElementById('ssid').value,p=document.getElementById('pass').value,m=document.getElementById('setmsg');if(s.length<1||s.length>32||p.length<8||p.length>63){m.textContent='Invalid SSID or password.';return}m.textContent='Saving and restarting...';try{let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})});if(!r.ok)throw 0}catch(e){m.textContent='Connection lost. The AP may be restarting.'}}"
 "async function loadSettings(){try{let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();document.getElementById('ssid').value=d.ssid||''}catch(e){}}"
 "function setOtaProgress(p){p=Math.max(0,Math.min(100,p));document.getElementById('otaProgress').classList.remove('hidden');document.getElementById('otaFill').style.width=p+'%';document.getElementById('otaPercent').textContent=Math.round(p)+'%'}"
-"function uploadFirmware(){let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg'),btn=document.getElementById('uploadBtn');if(!f){m.textContent='Select a .bin file first.';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device will restart after a successful update.'))return;btn.disabled=true;m.textContent='Uploading... Do not disconnect.';setOtaProgress(0);let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.upload.onprogress=function(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. Restarting...';setTimeout(()=>location.reload(),8000)}else{btn.disabled=false;m.textContent='OTA failed. Current firmware should remain active.'}};xhr.onerror=function(){if(document.getElementById('otaPercent').textContent==='100%'){m.textContent='Firmware uploaded. Device may be restarting...'}else{btn.disabled=false;m.textContent='Upload interrupted. Current firmware should remain active.'}};xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'};xhr.send(f)}"
+"function uploadFirmware(){let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg'),btn=document.getElementById('uploadBtn');if(!f){m.textContent='Select a .bin file first.';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device will restart after a successful update.'))return;let otaPassword=prompt('Enter OTA update password:');if(otaPassword===null)return;if(!otaPassword){m.textContent='OTA password is required.';return}btn.disabled=true;m.textContent='Uploading... Do not disconnect.';setOtaProgress(0);let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.setRequestHeader('X-OTA-Password',otaPassword);xhr.upload.onprogress=function(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. Restarting...';setTimeout(()=>location.reload(),8000)}else{btn.disabled=false;m.textContent='OTA failed. Current firmware should remain active.'}};xhr.onerror=function(){if(document.getElementById('otaPercent').textContent==='100%'){m.textContent='Firmware uploaded. Device may be restarting...'}else{btn.disabled=false;m.textContent='Upload interrupted. Current firmware should remain active.'}};xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'};xhr.send(f)}"
 "load();loadSettings();"
 "</script></body></html>";
 
@@ -801,6 +802,16 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
 
 static esp_err_t ota_handler(httpd_req_t *req)
 {
+    size_t pass_len = httpd_req_get_hdr_value_len(req, "X-OTA-Password");
+    if (pass_len == 0 || pass_len > MAX_AP_PASS_LEN) {
+        return send_json(req, "{\"error\":\"OTA password required\"}", "401 Unauthorized");
+    }
+    char ota_password[64];
+    if (httpd_req_get_hdr_value_str(req, "X-OTA-Password", ota_password, sizeof(ota_password)) != ESP_OK ||
+        strcmp(ota_password, OTA_UPDATE_PASSWORD) != 0) {
+        return send_json(req, "{\"error\":\"invalid OTA password\"}", "403 Forbidden");
+    }
+
     if (ota_in_progress) return send_json(req, "{\"error\":\"OTA busy\"}", "409 Conflict");
 
     if (req->content_len < 1024)

@@ -34,6 +34,10 @@
 #define RELAY1_GPIO             16
 #define RELAY2_GPIO             17
 #define RELAY3_GPIO             18
+#define RELAY4_GPIO             19
+#define RELAY5_GPIO             21
+
+#define RELAY_COUNT             5
 
 /* Change to 0 if your relay board is active-low. */
 #define RELAY_ACTIVE_LEVEL      1
@@ -49,6 +53,8 @@
 
 #define NVS_NAMESPACE           "home_cfg"
 #define NVS_KEY_RELAY_STATES    "relay"
+#define NVS_KEY_RELAY_ENABLED   "renable"
+#define NVS_KEY_RELAY_NAMES     "rnames"
 #define NVS_KEY_AP_SSID         "ap_ssid"
 #define NVS_KEY_AP_PASS         "ap_pass"
 
@@ -60,10 +66,20 @@
 
 #define MAX_AP_SSID_LEN         32
 #define MAX_AP_PASS_LEN         63
+#define MAX_RELAY_NAME_LEN      31
 
 /* ------------------------------------------------------------- */
 
-static int relay_state[3] = {0, 0, 0};
+static int relay_state[RELAY_COUNT] = {0, 0, 0, 0, 0};
+static bool relay_enabled[RELAY_COUNT] = {true, true, true, false, false};
+static char relay_name[RELAY_COUNT][MAX_RELAY_NAME_LEN + 1] = {
+    "Living Room Light",
+    "Ceiling Fan",
+    "Charging Socket",
+    "Relay 4",
+    "Relay 5"
+};
+
 static SemaphoreHandle_t relay_mutex;
 static SemaphoreHandle_t storage_mutex;
 static SemaphoreHandle_t ota_mutex;
@@ -107,6 +123,13 @@ static const char *HTML_PAGE =
 ".setting-item:first-child{border-top:0;padding-top:4px}.setting-title{font-weight:650;font-size:15px}.setting-desc{font-size:12px;color:var(--muted);margin-top:3px}"
 ".progress-wrap{margin-top:14px}.progress-head{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-bottom:6px}"
 ".progress{height:8px;background:#e8ebef;border-radius:20px;overflow:hidden}.progress-fill{height:100%;width:0;background:var(--accent);transition:width:.12s ease}"
+".relay-config{margin-top:10px}.relay-config-item{padding:14px 0;border-top:1px solid var(--line)}"
+".relay-config-item:first-child{border-top:0}.relay-config-head{display:flex;align-items:center;justify-content:space-between;gap:12px}"
+".small-switch{position:relative;width:48px;height:27px;flex:none}.small-switch input{opacity:0;width:0;height:0}"
+".small-slider{position:absolute;inset:0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}"
+".small-slider:before{content:'';position:absolute;width:21px;height:21px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}"
+".small-switch input:checked+.small-slider{background:var(--on)}.small-switch input:checked+.small-slider:before{transform:translateX(21px)}"
+".relay-number{font-weight:650;font-size:15px}.relay-gpio{font-size:12px;color:var(--muted);margin-top:3px}"
 "</style></head><body><main class='wrap'>"
 "<header class='top'><div class='topbar'>"
 "<div><h1>Smart Home</h1><div class='sub'>Local offline control</div></div>"
@@ -122,6 +145,9 @@ static const char *HTML_PAGE =
 "<div class='setting-item'>"
 "<div><div class='setting-title'>AP Configuration</div><div class='setting-desc'>Change the ESP32 local Wi-Fi SSID and password</div></div>"
 "<button onclick='togglePanel(\"settings\")'>Open</button></div>"
+"<div class='setting-item'>"
+"<div><div class='setting-title'>Relay Configuration</div><div class='setting-desc'>Enable Relay 4/5 and rename any relay</div></div>"
+"<button onclick='openRelayConfig()'>Open</button></div>"
 "<div id='ota' class='hidden'>"
 "<label class='field'>Firmware .bin</label><input id='fw' type='file' accept='.bin,application/octet-stream'>"
 "<div class='bar'><button id='uploadBtn' class='primary' onclick='uploadFirmware()'>Upload & Restart</button></div>"
@@ -134,20 +160,39 @@ static const char *HTML_PAGE =
 "<label class='field'>Password (8-63 characters)</label><input id='pass' type='password' maxlength='63'>"
 "<div class='bar'><button class='primary' onclick='saveSettings()'>Save & Restart</button></div>"
 "<div id='setmsg' class='msg'></div></div>"
+"<div id='relayConfig' class='hidden relay-config'>"
+"<div class='setting-item' style='margin-top:10px'>"
+"<div><div class='setting-title'>Relay Configuration</div><div class='setting-desc'>Relay 1-3 are always available. Relay 4-5 are optional.</div></div>"
+"</div>"
+"<div id='relayConfigList'></div>"
+"<div class='bar'><button class='primary' onclick='saveRelayConfig()'>Save Relay Configuration</button></div>"
+"<div id='relaymsg' class='msg'></div></div>"
 "</section>"
 "<div class='status'><span class='dot'></span> ESP32 local AP</div>"
 "</main><script>"
-"const names=['Living Room Light','Ceiling Fan','Charging Socket'];"
-"function render(a){let h='';a.forEach((v,i)=>{h+=`<section class='card'><div class='row'><div><div class='name'>${names[i]}</div><div class='state' id='st${i}'>${v?'ON':'OFF'}</div></div><label class='switch'><input type='checkbox' id='r${i}' ${v?'checked':''} onchange='setRelay(${i},this.checked)'><span class='slider'></span></label></div></section>`});document.getElementById('controls').innerHTML=h}"
-"async function load(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();render([!!d.relay1,!!d.relay2,!!d.relay3])}catch(e){setTimeout(load,1200)}}"
-"async function setRelay(i,on){let el=document.getElementById('r'+i);el.disabled=true;try{let r=await fetch(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});if(!r.ok)throw 0;await load()}catch(e){el.checked=!on;alert('Relay command failed.')}finally{el.disabled=false}}"
+"let relayCfg=["
+"{enabled:true,name:'Living Room Light',gpio:16},"
+"{enabled:true,name:'Ceiling Fan',gpio:17},"
+"{enabled:true,name:'Charging Socket',gpio:18},"
+"{enabled:false,name:'Relay 4',gpio:19},"
+"{enabled:false,name:'Relay 5',gpio:21}"
+"];"
+"function esc(s){return String(s).replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\\\"':'&quot;'}[c]))}"
+"function render(a){let h='';a.forEach((v,i)=>{if(!relayCfg[i]||!relayCfg[i].enabled)return;h+=`<section class='card'><div class='row'><div><div class='name'>${esc(relayCfg[i].name)}</div><div class='state' id='st${i}'>${v?'ON':'OFF'}</div></div><label class='switch'><input type='checkbox' id='r${i}' ${v?'checked':''} onchange='setRelay(${i},this.checked)'><span class='slider'></span></label></div></section>`});document.getElementById('controls').innerHTML=h}"
+"async function load(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;render(d.states||[])}catch(e){setTimeout(load,1200)}}"
+"async function setRelay(i,on){let el=document.getElementById('r'+i);if(!el)return;el.disabled=true;try{let r=await fetch(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});if(!r.ok)throw 0;await load()}catch(e){el.checked=!on;alert('Relay command failed.')}finally{el.disabled=false}}"
 "function togglePanel(id){document.getElementById(id).classList.toggle('hidden')}"
+"function openRelayConfig(){document.getElementById('relayConfig').classList.remove('hidden');document.getElementById('relaymsg').textContent='';renderRelayConfig();}"
+"function renderRelayConfig(){let h='';relayCfg.forEach((r,i)=>{let optional=i>=3;h+=`<div class='relay-config-item'><div class='relay-config-head'><div><div class='relay-number'>Relay ${i+1}</div><div class='relay-gpio'>GPIO ${r.gpio}${optional?' · Optional':''}</div></div>${optional?`<label class='small-switch'><input type='checkbox' id='en${i}' ${r.enabled?'checked':''} onchange='relayEnableChanged(${i})'><span class='small-slider'></span></label>`:''}</div><label class='field'>Name</label><input type='text' id='rn${i}' maxlength='31' value='${esc(r.name)}' ${optional&&!r.enabled?'disabled':''}></div>`});document.getElementById('relayConfigList').innerHTML=h}"
+"function relayEnableChanged(i){let en=document.getElementById('en'+i).checked;document.getElementById('rn'+i).disabled=!en}"
+"async function saveRelayConfig(){let m=document.getElementById('relaymsg');let cfg=[];for(let i=0;i<5;i++){let enabled=i<3?true:document.getElementById('en'+i).checked;let name=document.getElementById('rn'+i).value.trim();if(!name)name='Relay '+(i+1);if(name.length>31){m.textContent='Relay name is too long.';return}cfg.push({enabled,name})}m.textContent='Saving...';try{let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({relays:cfg})});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;m.textContent='Saved successfully.';renderRelayConfig();await load()}catch(e){m.textContent='Could not save relay configuration.'}}"
 "async function saveSettings(){let s=document.getElementById('ssid').value,p=document.getElementById('pass').value,m=document.getElementById('setmsg');if(s.length<1||s.length>32||p.length<8||p.length>63){m.textContent='Invalid SSID or password.';return}m.textContent='Saving and restarting...';try{let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})});if(!r.ok)throw 0}catch(e){m.textContent='Connection lost. The AP may be restarting.'}}"
 "async function loadSettings(){try{let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();document.getElementById('ssid').value=d.ssid||''}catch(e){}}"
 "function setOtaProgress(p){p=Math.max(0,Math.min(100,p));document.getElementById('otaProgress').classList.remove('hidden');document.getElementById('otaFill').style.width=p+'%';document.getElementById('otaPercent').textContent=Math.round(p)+'%'}"
 "function uploadFirmware(){let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg'),btn=document.getElementById('uploadBtn');if(!f){m.textContent='Select a .bin file first.';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device will restart after a successful update.'))return;btn.disabled=true;m.textContent='Uploading... Do not disconnect.';setOtaProgress(0);let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.upload.onprogress=function(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. Restarting...';setTimeout(()=>location.reload(),8000)}else{btn.disabled=false;m.textContent='OTA failed. Current firmware should remain active.'}};xhr.onerror=function(){if(document.getElementById('otaPercent').textContent==='100%'){m.textContent='Firmware uploaded. Device may be restarting...'}else{btn.disabled=false;m.textContent='Upload interrupted. Current firmware should remain active.'}};xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'};xhr.send(f)}"
 "load();loadSettings();"
 "</script></body></html>";
+
 /* -------------------- NVS / persistence -------------------- */
 
 static bool valid_ssid(const char *s)
@@ -162,11 +207,27 @@ static bool valid_password(const char *s)
     return n >= 8 && n <= MAX_AP_PASS_LEN;
 }
 
+static bool valid_relay_name(const char *s)
+{
+    size_t n = strnlen(s, MAX_RELAY_NAME_LEN + 1);
+    return n >= 1 && n <= MAX_RELAY_NAME_LEN;
+}
+
 static void load_defaults(void)
 {
     strlcpy(ap_ssid, DEFAULT_AP_SSID, sizeof(ap_ssid));
     strlcpy(ap_password, DEFAULT_AP_PASSWORD, sizeof(ap_password));
-    relay_state[0] = relay_state[1] = relay_state[2] = 0;
+
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        relay_state[i] = 0;
+        relay_enabled[i] = (i < 3);
+    }
+
+    strlcpy(relay_name[0], "Living Room Light", sizeof(relay_name[0]));
+    strlcpy(relay_name[1], "Ceiling Fan", sizeof(relay_name[1]));
+    strlcpy(relay_name[2], "Charging Socket", sizeof(relay_name[2]));
+    strlcpy(relay_name[3], "Relay 4", sizeof(relay_name[3]));
+    strlcpy(relay_name[4], "Relay 5", sizeof(relay_name[4]));
 }
 
 static void load_nvs(void)
@@ -180,10 +241,34 @@ static void load_nvs(void)
         return;
     }
 
-    uint8_t states[3];
+    uint8_t states[RELAY_COUNT] = {0};
     size_t sz = sizeof(states);
     if (nvs_get_blob(h, NVS_KEY_RELAY_STATES, states, &sz) == ESP_OK && sz == sizeof(states)) {
-        for (int i = 0; i < 3; ++i) relay_state[i] = states[i] ? 1 : 0;
+        for (int i = 0; i < RELAY_COUNT; ++i) relay_state[i] = states[i] ? 1 : 0;
+    }
+
+    uint8_t enabled[RELAY_COUNT] = {1, 1, 1, 0, 0};
+    sz = sizeof(enabled);
+    if (nvs_get_blob(h, NVS_KEY_RELAY_ENABLED, enabled, &sz) == ESP_OK && sz == sizeof(enabled)) {
+        for (int i = 0; i < RELAY_COUNT; ++i) {
+            relay_enabled[i] = (i < 3) ? true : (enabled[i] != 0);
+        }
+    }
+
+    size_t names_sz = sizeof(relay_name);
+    if (nvs_get_blob(h, NVS_KEY_RELAY_NAMES, relay_name, &names_sz) == ESP_OK &&
+        names_sz == sizeof(relay_name)) {
+        for (int i = 0; i < RELAY_COUNT; ++i) {
+            relay_name[i][MAX_RELAY_NAME_LEN] = '\0';
+            if (!valid_relay_name(relay_name[i])) {
+                if (i == 0) strlcpy(relay_name[i], "Living Room Light", sizeof(relay_name[i]));
+                else if (i == 1) strlcpy(relay_name[i], "Ceiling Fan", sizeof(relay_name[i]));
+                else if (i == 2) strlcpy(relay_name[i], "Charging Socket", sizeof(relay_name[i]));
+                else {
+                    snprintf(relay_name[i], sizeof(relay_name[i]), "Relay %d", i + 1);
+                }
+            }
+        }
     }
 
     char tmp_ssid[MAX_AP_SSID_LEN + 1] = {0};
@@ -199,14 +284,17 @@ static void load_nvs(void)
     }
 
     nvs_close(h);
-    ESP_LOGI(TAG, "Restored relay states: %d %d %d", relay_state[0], relay_state[1], relay_state[2]);
+    ESP_LOGI(TAG, "Restored relay states: %d %d %d %d %d",
+             relay_state[0], relay_state[1], relay_state[2], relay_state[3], relay_state[4]);
+    ESP_LOGI(TAG, "Relay enabled: %d %d %d %d %d",
+             relay_enabled[0], relay_enabled[1], relay_enabled[2], relay_enabled[3], relay_enabled[4]);
 }
 
 static esp_err_t save_relay_states(void)
 {
-    uint8_t states[3];
+    uint8_t states[RELAY_COUNT];
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
-    for (int i = 0; i < 3; ++i) states[i] = relay_state[i];
+    for (int i = 0; i < RELAY_COUNT; ++i) states[i] = relay_state[i] ? 1 : 0;
     xSemaphoreGive(relay_mutex);
 
     xSemaphoreTake(storage_mutex, portMAX_DELAY);
@@ -220,6 +308,29 @@ static esp_err_t save_relay_states(void)
     xSemaphoreGive(storage_mutex);
 
     if (err != ESP_OK) ESP_LOGE(TAG, "Relay NVS save failed: %s", esp_err_to_name(err));
+    return err;
+}
+
+static esp_err_t save_relay_config(void)
+{
+    uint8_t enabled[RELAY_COUNT];
+
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    for (int i = 0; i < RELAY_COUNT; ++i) enabled[i] = relay_enabled[i] ? 1 : 0;
+    xSemaphoreGive(relay_mutex);
+
+    xSemaphoreTake(storage_mutex, portMAX_DELAY);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, NVS_KEY_RELAY_ENABLED, enabled, sizeof(enabled));
+        if (err == ESP_OK) err = nvs_set_blob(h, NVS_KEY_RELAY_NAMES, relay_name, sizeof(relay_name));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    xSemaphoreGive(storage_mutex);
+
+    if (err != ESP_OK) ESP_LOGE(TAG, "Relay config NVS save failed: %s", esp_err_to_name(err));
     return err;
 }
 
@@ -250,22 +361,37 @@ static int relay_output_level(int logical_state)
     return logical_state ? RELAY_ACTIVE_LEVEL : !RELAY_ACTIVE_LEVEL;
 }
 
+static gpio_num_t relay_gpio(int index)
+{
+    static const gpio_num_t pins[RELAY_COUNT] = {
+        RELAY1_GPIO, RELAY2_GPIO, RELAY3_GPIO, RELAY4_GPIO, RELAY5_GPIO
+    };
+    return pins[index];
+}
+
 static void apply_all_relays(void)
 {
-    int s[3];
+    int s[RELAY_COUNT];
+    bool enabled[RELAY_COUNT];
+
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
     memcpy(s, relay_state, sizeof(s));
+    memcpy(enabled, relay_enabled, sizeof(enabled));
     xSemaphoreGive(relay_mutex);
 
-    gpio_set_level(RELAY1_GPIO, relay_output_level(s[0]));
-    gpio_set_level(RELAY2_GPIO, relay_output_level(s[1]));
-    gpio_set_level(RELAY3_GPIO, relay_output_level(s[2]));
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        gpio_set_level(relay_gpio(i),
+                       (enabled[i] && s[i]) ? RELAY_ACTIVE_LEVEL : !RELAY_ACTIVE_LEVEL);
+    }
 }
 
 static void init_relays(void)
 {
+    uint64_t mask = 0;
+    for (int i = 0; i < RELAY_COUNT; ++i) mask |= (1ULL << relay_gpio(i));
+
     gpio_config_t io = {
-        .pin_bit_mask = (1ULL << RELAY1_GPIO) | (1ULL << RELAY2_GPIO) | (1ULL << RELAY3_GPIO),
+        .pin_bit_mask = mask,
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -274,9 +400,9 @@ static void init_relays(void)
     ESP_ERROR_CHECK(gpio_config(&io));
 
     /* Safe physical OFF before restoring persistent state. */
-    gpio_set_level(RELAY1_GPIO, relay_output_level(0));
-    gpio_set_level(RELAY2_GPIO, relay_output_level(0));
-    gpio_set_level(RELAY3_GPIO, relay_output_level(0));
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        gpio_set_level(relay_gpio(i), relay_output_level(0));
+    }
 }
 
 /* -------------------- Wi-Fi AP -------------------- */
@@ -357,19 +483,16 @@ static int build_dns_answer(uint8_t *out, int out_cap, const uint8_t *query, int
     if (qend < 0 || qend + 16 > out_cap || qend > qlen) return -1;
 
     memcpy(out, query, qend);
-    out[2] = 0x81; out[3] = 0x80; /* standard response, no error */
-    out[4] = 0x00; out[5] = 0x00; /* QDCOUNT = 0 in our response copy */
-    out[6] = 0x00; out[7] = 0x01; /* ANCOUNT = 1 */
+    out[2] = 0x81; out[3] = 0x80;
+    out[4] = 0x00; out[5] = 0x01;
+    out[6] = 0x00; out[7] = 0x01;
     out[8] = out[9] = out[10] = out[11] = 0;
 
-    /* Keep the original question. DNS header QDCOUNT should be 1. */
-    out[4] = 0x00; out[5] = 0x01;
-
     int p = qend;
-    out[p++] = 0xC0; out[p++] = 0x0C; /* name pointer */
-    out[p++] = 0x00; out[p++] = 0x01; /* A */
-    out[p++] = 0x00; out[p++] = 0x01; /* IN */
-    out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x3C; /* TTL 60 */
+    out[p++] = 0xC0; out[p++] = 0x0C;
+    out[p++] = 0x00; out[p++] = 0x01;
+    out[p++] = 0x00; out[p++] = 0x01;
+    out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x00; out[p++] = 0x3C;
     out[p++] = 0x00; out[p++] = 0x04;
     out[p++] = 192; out[p++] = 168; out[p++] = 4; out[p++] = 1;
     return p;
@@ -444,13 +567,32 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 static esp_err_t status_handler(httpd_req_t *req)
 {
-    int s[3];
+    int s[RELAY_COUNT];
+    bool enabled[RELAY_COUNT];
+    char names[RELAY_COUNT][MAX_RELAY_NAME_LEN + 1];
+
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
     memcpy(s, relay_state, sizeof(s));
+    memcpy(enabled, relay_enabled, sizeof(enabled));
+    memcpy(names, relay_name, sizeof(names));
     xSemaphoreGive(relay_mutex);
 
-    char json[128];
-    snprintf(json, sizeof(json), "{\"relay1\":%d,\"relay2\":%d,\"relay3\":%d}", s[0], s[1], s[2]);
+    char json[1024];
+    int pos = snprintf(json, sizeof(json), "{\"states\":[");
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        pos += snprintf(json + pos, sizeof(json) - pos, "%d%s", s[i], i == RELAY_COUNT - 1 ? "" : ",");
+    }
+    pos += snprintf(json + pos, sizeof(json) - pos, "],\"config\":[");
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        pos += snprintf(json + pos, sizeof(json) - pos,
+                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d}%s",
+                        enabled[i] ? "true" : "false",
+                        names[i],
+                        (int)relay_gpio(i),
+                        i == RELAY_COUNT - 1 ? "" : ",");
+    }
+    snprintf(json + pos, sizeof(json) - pos, "]}");
+
     return send_json(req, json, "200 OK");
 }
 
@@ -466,25 +608,32 @@ static esp_err_t relay_handler(httpd_req_t *req)
 
     if (httpd_query_key_value(query, "relay", value, sizeof(value)) != ESP_OK)
         return send_json(req, "{\"error\":\"relay\"}", "400 Bad Request");
+
     char *end = NULL;
     long relay = strtol(value, &end, 10);
-    if (*value == '\0' || *end != '\0' || relay < 1 || relay > 3)
+    if (*value == '\0' || *end != '\0' || relay < 1 || relay > RELAY_COUNT)
         return send_json(req, "{\"error\":\"relay\"}", "400 Bad Request");
 
     if (httpd_query_key_value(query, "state", value, sizeof(value)) != ESP_OK)
         return send_json(req, "{\"error\":\"state\"}", "400 Bad Request");
+
     end = NULL;
     long state = strtol(value, &end, 10);
     if (*value == '\0' || *end != '\0' || (state != 0 && state != 1))
         return send_json(req, "{\"error\":\"state\"}", "400 Bad Request");
 
+    int idx = (int)relay - 1;
+
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
-    relay_state[relay - 1] = (int)state;
-    gpio_num_t pins[3] = {RELAY1_GPIO, RELAY2_GPIO, RELAY3_GPIO};
-    gpio_set_level(pins[relay - 1], relay_output_level((int)state));
+    if (!relay_enabled[idx]) {
+        xSemaphoreGive(relay_mutex);
+        return send_json(req, "{\"error\":\"relay disabled\"}", "409 Conflict");
+    }
+
+    relay_state[idx] = (int)state;
+    gpio_set_level(relay_gpio(idx), relay_output_level((int)state));
     xSemaphoreGive(relay_mutex);
 
-    /* Persist only actual user changes. */
     esp_err_t err = save_relay_states();
     if (err != ESP_OK) {
         return send_json(req, "{\"error\":\"state applied but not saved\"}", "500 Internal Server Error");
@@ -514,12 +663,34 @@ static bool json_extract_string(const char *body, const char *key, char *out, si
     p++;
     size_t i = 0;
     while (*p && *p != '"' && i + 1 < out_sz) {
-        if (*p == '\\' && p[1]) return false; /* reject escapes for simplicity */
+        if (*p == '\\' && p[1]) return false;
         out[i++] = *p++;
     }
     if (*p != '"') return false;
     out[i] = '\0';
     return true;
+}
+
+static bool json_extract_bool(const char *body, const char *key, bool *out)
+{
+    char needle[40];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(body, needle);
+    if (!p) return false;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (strncmp(p, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
 }
 
 static esp_err_t settings_post_handler(httpd_req_t *req)
@@ -555,6 +726,75 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     vTaskDelay(pdMS_TO_TICKS(700));
     esp_restart();
     return ESP_OK;
+}
+
+static esp_err_t relay_config_post_handler(httpd_req_t *req)
+{
+    if (ota_in_progress) return send_json(req, "{\"error\":\"OTA in progress\"}", "409 Conflict");
+    if (req->content_len <= 0 || req->content_len > 2048)
+        return send_json(req, "{\"error\":\"invalid body\"}", "400 Bad Request");
+
+    char body[2049];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) return ESP_FAIL;
+        received += (size_t)n;
+    }
+    body[received] = '\0';
+
+    bool new_enabled[RELAY_COUNT];
+    char new_names[RELAY_COUNT][MAX_RELAY_NAME_LEN + 1];
+
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        char key[16];
+
+        if (i < 3) {
+            new_enabled[i] = true;
+        } else {
+            snprintf(key, sizeof(key), "r%d_enabled", i + 1);
+            if (!json_extract_bool(body, key, &new_enabled[i])) {
+                return send_json(req, "{\"error\":\"invalid relay enable state\"}", "400 Bad Request");
+            }
+        }
+
+        snprintf(key, sizeof(key), "r%d_name", i + 1);
+        if (!json_extract_string(body, key, new_names[i], sizeof(new_names[i])) ||
+            !valid_relay_name(new_names[i])) {
+            return send_json(req, "{\"error\":\"invalid relay name\"}", "400 Bad Request");
+        }
+    }
+
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        relay_enabled[i] = new_enabled[i];
+        strlcpy(relay_name[i], new_names[i], sizeof(relay_name[i]));
+
+        if (!relay_enabled[i]) {
+            relay_state[i] = 0;
+            gpio_set_level(relay_gpio(i), relay_output_level(0));
+        }
+    }
+    xSemaphoreGive(relay_mutex);
+
+    esp_err_t err = save_relay_config();
+    if (err != ESP_OK)
+        return send_json(req, "{\"error\":\"configuration save failed\"}", "500 Internal Server Error");
+
+    /* Return the same compact configuration format the page already uses. */
+    char json[1024];
+    int pos = snprintf(json, sizeof(json), "{\"config\":[");
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        pos += snprintf(json + pos, sizeof(json) - pos,
+                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d}%s",
+                        relay_enabled[i] ? "true" : "false",
+                        relay_name[i],
+                        (int)relay_gpio(i),
+                        i == RELAY_COUNT - 1 ? "" : ",");
+    }
+    snprintf(json + pos, sizeof(json) - pos, "]}");
+
+    return send_json(req, json, "200 OK");
 }
 
 /* -------------------- OTA -------------------- */
@@ -664,6 +904,7 @@ static void start_http_server(void)
     httpd_uri_t relay = {.uri="/api/relay", .method=HTTP_GET, .handler=relay_handler};
     httpd_uri_t settings_get = {.uri="/api/settings", .method=HTTP_GET, .handler=settings_get_handler};
     httpd_uri_t settings_post = {.uri="/api/settings", .method=HTTP_POST, .handler=settings_post_handler};
+    httpd_uri_t relay_config_post = {.uri="/api/relays", .method=HTTP_POST, .handler=relay_config_post_handler};
     httpd_uri_t ota = {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler};
 
     httpd_uri_t c1 = {.uri="/generate_204", .method=HTTP_GET, .handler=captive_handler};
@@ -678,6 +919,7 @@ static void start_http_server(void)
     httpd_register_uri_handler(http_server, &relay);
     httpd_register_uri_handler(http_server, &settings_get);
     httpd_register_uri_handler(http_server, &settings_post);
+    httpd_register_uri_handler(http_server, &relay_config_post);
     httpd_register_uri_handler(http_server, &ota);
     httpd_register_uri_handler(http_server, &c1);
     httpd_register_uri_handler(http_server, &c2);
@@ -693,8 +935,6 @@ static void start_http_server(void)
 
 static void watchdog_keepalive_task(void *arg)
 {
-    /* This task is intentionally simple. Idle-task TWDT monitoring is also
-       enabled by the configuration below; this task protects its own loop. */
     esp_task_wdt_add(NULL);
 
     while (1) {
@@ -726,7 +966,6 @@ void app_main(void)
     init_relays();
     apply_all_relays();
 
-    /* Configure TWDT with idle-task monitoring. */
     esp_task_wdt_config_t wdt_config = {
         .timeout_ms = WATCHDOG_TIMEOUT_MS,
         .idle_core_mask = (1U << portNUM_PROCESSORS) - 1U,
@@ -752,9 +991,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Offline Smart Home ready");
     ESP_LOGI(TAG, "Control:  http://%s/", AP_IP_ADDR);
     ESP_LOGI(TAG, "AP only: no STA, no Internet");
+    ESP_LOGI(TAG, "Relays: 3 fixed + 2 optional");
     ESP_LOGI(TAG, "========================================");
 
-    /* Keep app_main alive as a lightweight supervisor. */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
     }

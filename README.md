@@ -7,6 +7,22 @@ physical-switch control, persistent configuration and local OTA updates.
 
 ------------------------------------------------------------------------
 
+
+## Firmware Flashing
+
+For a complete ESP32 firmware installation, flash the following files at the specified addresses:
+
+| File | Flash Address |
+|---|---:|
+| `bootloader.bin` | `0x1000` |
+| `partition-table.bin` | `0x8000` |
+| `ota_data_initial.bin` | `0xF000` |
+| `offline_smart_home.bin` | `0x20000` |
+
+> **Note:** These addresses are for a complete initial firmware flash.  
+> For OTA updates, use only `offline_smart_home.bin` through the built-in OTA update system.
+
+
 ## 🔐 Default Access
 
   Setting                   Default

@@ -70,6 +70,7 @@
 #define NVS_KEY_RELAY_NAMES     "rnames"
 #define NVS_KEY_AP_SSID         "ap_ssid"
 #define NVS_KEY_AP_PASS         "ap_pass"
+#define NVS_KEY_OTA_PASS        "ota_pass"
 
 #define WATCHDOG_TIMEOUT_MS     10000
 #define DNS_PORT                53
@@ -81,6 +82,7 @@
 #define MAX_AP_PASS_LEN         63
 #define MAX_RELAY_NAME_LEN      31
 #define OTA_UPDATE_PASSWORD     "OTA@ESP32#2026"
+#define MAX_OTA_PASS_LEN        63
 
 /* ------------------------------------------------------------- */
 
@@ -100,6 +102,7 @@ static SemaphoreHandle_t ota_mutex;
 
 static char ap_ssid[MAX_AP_SSID_LEN + 1] = DEFAULT_AP_SSID;
 static char ap_password[MAX_AP_PASS_LEN + 1] = DEFAULT_AP_PASSWORD;
+static char ota_password[MAX_OTA_PASS_LEN + 1] = OTA_UPDATE_PASSWORD;
 
 static TaskHandle_t dns_task_handle = NULL;
 static TaskHandle_t switch_task_handle = NULL;
@@ -109,140 +112,349 @@ static httpd_handle_t http_server = NULL;
 /* -------------------- Local Web UI -------------------- */
 
 static const char *HTML_PAGE =
-"<!doctype html><html lang='en'><head>\n<meta charset='utf-8'>\n<meta name='viewport' content='width=device-width,initial-s"
-"cale=1,viewport-fit=cover'>\n<meta name='theme-color' content='#111827'>\n<title>ESP32 Smart Home</title>\n<style>\n:root{--"
-"bg:#f3f5f7;--card:#fff;--text:#17202a;--muted:#697586;--line:#e5e7eb;--on:#168a4b;--off:#9aa3ad;--accent:#2563eb;--dange"
-"r:#b42318}\n*{box-sizing:border-box}\nhtml,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-famil"
-"y:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}\nbody{overflow-x:hidden}\n.wrap{width:min(680px,100%);margin:a"
-"uto;padding:18px 14px 34px}\n.top{padding:8px 4px 18px}\n.topbar{display:flex;align-items:center;justify-content:space-bet"
-"ween;gap:12px}\nh1{font-size:25px;margin:0 0 5px}.sub{color:var(--muted);font-size:14px}\n.settings-btn,.icon-btn{width:42"
-"px;height:42px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-c"
-"ontent:center;font-size:21px;cursor:pointer;box-shadow:0 2px 8px rgba(15,23,42,.06)}\n.settings-btn:active,.icon-btn:acti"
-"ve{transform:scale(.96)}\n.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margi"
-"n:12px 0;box-shadow:0 2px 10px rgba(15,23,42,.04)}\n.row{display:flex;align-items:center;justify-content:space-between;ga"
-"p:15px}\n.name{font-weight:650;font-size:17px}.state{font-size:13px;color:var(--muted);margin-top:4px}\n.switch{position:r"
-"elative;width:58px;height:32px;flex:none}.switch input{opacity:0;width:0;height:0}\n.slider{position:absolute;inset:0;bac"
-"kground:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}\n.slider:before{content:'';position:absolute;width:26p"
-"x;height:26px;left:3px;top:3px;background:white;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}\ninput:chec"
-"ked+.slider{background:var(--on)}input:checked+.slider:before{transform:translateX(26px)}\nbutton{border:1px solid var(--"
-"line);background:#fff;border-radius:10px;padding:10px 13px;font:inherit;cursor:pointer}\nbutton.primary{background:var(--"
-"accent);border-color:var(--accent);color:#fff}button:disabled{opacity:.55;cursor:not-allowed}\n.msg{font-size:13px;margin"
-"-top:10px;color:var(--muted)}\ninput[type=text],input[type=password],input[type=file]{width:100%;padding:11px;border:1px "
-"solid #d5dae0;border-radius:10px;background:#fff;font:inherit}\nlabel.field{display:block;font-size:13px;color:var(--mute"
-"d);margin:13px 0 6px}\n.hidden{display:none!important}\n.status{display:inline-flex;align-items:center;gap:7px;font-size:1"
-"2px;color:var(--muted)}.dot{width:8px;height:8px;border-radius:50%;background:var(--on)}\n.progress-wrap{margin-top:14px}"
-".progress-head{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-bottom:6px}\n"
-".progress{height:8px;background:#e8ebef;border-radius:20px;overflow:hidden}.progress-fill{height:100%;width:0;background"
-":var(--accent);transition:width:.12s ease}\n.bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.setting-list{margin"
-"-top:12px}.setting-item{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 2px;border-t"
-"op:1px solid var(--line);cursor:pointer}\n.setting-item:first-child{border-top:0}.setting-item:active{opacity:.72}\n.setti"
-"ng-title{font-weight:650;font-size:16px}.setting-desc{font-size:12px;color:var(--muted);margin-top:3px}\n.chevron{font-si"
-"ze:25px;color:var(--muted);line-height:1}\n.panel{position:fixed;inset:0;background:var(--bg);z-index:1000;overflow-y:aut"
-"o;transform:translateX(100%);transition:transform .28s cubic-bezier(.22,.61,.36,1);visibility:hidden}\n.panel.open{transf"
-"orm:translateX(0);visibility:visible}\n.panel-inner{width:min(680px,100%);min-height:100%;margin:auto;padding:18px 14px 3"
-"4px}\n.panel-header{display:flex;align-items:center;gap:12px;padding:4px 0 16px;position:sticky;top:0;background:var(--bg"
-");z-index:2}\n.panel-header h2{font-size:21px;margin:0;flex:1}.back-btn{font-size:20px;padding:8px 12px}\n.close-btn{font-"
-"size:22px;padding:8px 12px}\n.subpage{position:fixed;inset:0;background:var(--bg);z-index:1100;overflow-y:auto;transform:"
-"translateX(100%);transition:transform .25s cubic-bezier(.22,.61,.36,1);visibility:hidden}\n.subpage.open{transform:transl"
-"ateX(0);visibility:visible}\n.subpage-inner{width:min(680px,100%);min-height:100%;margin:auto;padding:18px 14px 34px}\n.su"
-"bpage-header{display:flex;align-items:center;gap:12px;padding:4px 0 16px;position:sticky;top:0;background:var(--bg);z-in"
-"dex:2}\n.subpage-header h2{font-size:21px;margin:0;flex:1}\n.back-wide{width:100%;margin-top:22px}\n.relay-config{margin-to"
-"p:4px}.relay-config-item{padding:14px 0;border-top:1px solid var(--line)}.relay-config-item:first-child{border-top:0}\n.r"
-"elay-config-head{display:flex;align-items:center;justify-content:space-between;gap:12px}\n.small-switch{position:relative"
-";width:48px;height:27px;flex:none}.small-switch input{opacity:0;width:0;height:0}\n.small-slider{position:absolute;inset:"
-"0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}\n.small-slider:before{content:'';position:absolut"
-"e;width:21px;height:21px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}\n"
-".small-switch input:checked+.small-slider{background:var(--on)}.small-switch input:checked+.small-slider:before{transfor"
-"m:translateX(21px)}\n.relay-number{font-weight:650;font-size:15px}.relay-gpio{font-size:12px;color:var(--muted);margin-to"
-"p:3px}.relay-switch-gpio{font-size:12px;color:var(--muted);margin-top:2px}\n</style></head><body>\n<main class='wrap'><hea"
-"der class='top'><div class='topbar'>\n<div><h1>Smart Home</h1><div class='sub'>Local offline control</div></div>\n<button "
-"class='settings-btn' onclick='openSettings()' aria-label='Settings' title='Settings'>&#9881;</button>\n</div></header><se"
-"ction id='controls'></section>\n<div class='status'><span class='dot'></span> ESP32 local AP</div></main>\n\n<section id='s"
-"ettingsMenu' class='panel' aria-hidden='true'>\n<div class='panel-inner'><header class='panel-header'>\n<div><h2>Settings<"
-"/h2><div class='sub'>Device configuration</div></div>\n<button class='icon-btn close-btn' onclick='closeSettings()' aria-"
-"label='Close settings' title='Close'>&#10005;</button>\n</header>\n<div class='card setting-list'>\n<div class='setting-ite"
-"m' onclick='openSubPage(\"otaPage\")' role='button' tabindex='0'><div><div class='setting-title'>OTA Update</div><div clas"
-"s='setting-desc'>Update firmware locally from a .bin file</div></div><div class='chevron'>&#8250;</div></div>\n<div class"
-"='setting-item' onclick='openSubPage(\"relayPage\")' role='button' tabindex='0'><div><div class='setting-title'>Relay Conf"
-"iguration</div><div class='setting-desc'>Enable Relay 4/5 and rename any relay</div></div><div class='chevron'>&#8250;</"
-"div></div>\n<div class='setting-item' onclick='openSubPage(\"apPage\")' role='button' tabindex='0'><div><div class='setting"
-"-title'>AP Configuration</div><div class='setting-desc'>Change the ESP32 local Wi-Fi SSID and password</div></div><div c"
-"lass='chevron'>&#8250;</div></div>\n</div></div>\n</section>\n\n<section id='otaPage' class='subpage' aria-hidden='true'><di"
-"v class='subpage-inner'>\n<header class='subpage-header'><button class='icon-btn back-btn' onclick='backToSettings()' ari"
-"a-label='Back'>&#8592;</button><h2>OTA Update</h2></header>\n<div class='card'>\n<div class='state'>Update firmware locall"
-"y from a .bin file.</div>\n<label class='field'>Firmware .bin</label><input id='fw' type='file' accept='.bin,application/"
-"octet-stream'>\n<div class='bar'><button id='uploadBtn' class='primary' onclick='uploadFirmware()'>Upload &amp; Restart</"
-"button></div>\n<div id='otaProgress' class='progress-wrap hidden'><div class='progress-head'><span id='otaProgressText'>U"
-"ploading...</span><span id='otaPercent'>0%</span></div><div class='progress'><div id='otaFill' class='progress-fill'></d"
-"iv></div></div>\n<div id='otamsg' class='msg'></div>\n</div><button class='back-wide' onclick='backToSettings()'>&#8592; B"
-"ack to Settings</button>\n</div></section>\n\n<section id='relayPage' class='subpage' aria-hidden='true'><div class='subpag"
-"e-inner'>\n<header class='subpage-header'><button class='icon-btn back-btn' onclick='backToSettings()' aria-label='Back'>"
-"&#8592;</button><h2>Relay Configuration</h2></header>\n<div class='card'><div class='state'>Relay 1-3 are always availabl"
-"e. Relay 4-5 are optional.</div><div id='relayConfigList' class='relay-config'></div>\n<div class='bar'><button class='pr"
-"imary' onclick='saveRelayConfig()'>Save Relay Configuration</button></div><div id='relaymsg' class='msg'></div></div>\n<b"
-"utton class='back-wide' onclick='backToSettings()'>&#8592; Back to Settings</button>\n</div></section>\n\n<section id='apPa"
-"ge' class='subpage' aria-hidden='true'><div class='subpage-inner'>\n<header class='subpage-header'><button class='icon-bt"
-"n back-btn' onclick='backToSettings()' aria-label='Back'>&#8592;</button><h2>AP Configuration</h2></header>\n<div class='"
-"card'><div class='state'>Configure the ESP32 local Wi-Fi network.</div>\n<label class='field'>SSID</label><input id='ssid"
-"' maxlength='32'>\n<label class='field'>Password (8-63 characters)</label><input id='pass' type='password' maxlength='63'"
-">\n<div class='bar'><button class='primary' onclick='saveSettings()'>Save &amp; Restart</button></div><div id='setmsg' cl"
-"ass='msg'></div>\n</div><button class='back-wide' onclick='backToSettings()'>&#8592; Back to Settings</button>\n</div></se"
-"ction>\n\n<script>\nlet relayCfg=[{enabled:true,name:'Living Room Light',gpio:16,switchGpio:32},{enabled:true,name:'Ceiling"
-" Fan',gpio:17,switchGpio:33},{enabled:true,name:'Charging Socket',gpio:18,switchGpio:25},{enabled:false,name:'Relay 4',g"
-"pio:19,switchGpio:26},{enabled:false,name:'Relay 5',gpio:21,switchGpio:27}];\n\nfunction esc(s){return String(s).replace(/"
-"[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\"':'&quot;'}[c]))}\nfunction render(a){let h='';a.forEach(("
-"v,i)=>{if(!relayCfg[i]||!relayCfg[i].enabled)return;h+=`<section class='card'><div class='row'><div><div class='name'>${"
-"esc(relayCfg[i].name)}</div><div class='state' id='st${i}'>${v?'ON':'OFF'}</div></div><label class='switch'><input type="
-"'checkbox' id='r${i}' ${v?'checked':''} onchange='setRelay(${i},this.checked)'><span class='slider'></span></label></div"
-"></section>`});document.getElementById('controls').innerHTML=h}\nasync function load(){try{let r=await fetch('/api/status"
-"',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;render(d.states||[])}catch(e){}}"
-"\nasync function setRelay(i,on){let el=document.getElementById('r'+i);if(!el)return;el.disabled=true;try{let r=await fetc"
-"h(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});if(!r.ok)throw 0;await load()}catch(e){el.checked=!on;al"
-"ert('Relay command failed.')}finally{el.disabled=false}}\n\nfunction openSettings(){let p=document.getElementById('setting"
-"sMenu');p.classList.add('open');p.setAttribute('aria-hidden','false');document.body.style.overflow='hidden'}\nfunction cl"
-"oseSettings(){closeSubPages();let p=document.getElementById('settingsMenu');p.classList.remove('open');p.setAttribute('a"
-"ria-hidden','true');document.body.style.overflow=''}\nfunction openSubPage(id){closeSubPages();let p=document.getElementB"
-"yId(id);if(!p)return;p.classList.add('open');p.setAttribute('aria-hidden','false');if(id==='relayPage'){document.getElem"
-"entById('relaymsg').textContent='';renderRelayConfig()}if(id==='apPage')loadSettings()}\nfunction closeSubPages(){documen"
-"t.querySelectorAll('.subpage').forEach(p=>{p.classList.remove('open');p.setAttribute('aria-hidden','true')})}\nfunction b"
-"ackToSettings(){closeSubPages();let s=document.getElementById('settingsMenu');s.classList.add('open');s.setAttribute('ar"
-"ia-hidden','false')}\n\ndocument.querySelectorAll('.setting-item[role=button]').forEach(el=>el.addEventListener('keydown',"
-"e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();el.click()}}));\n\nfunction renderRelayConfig(){let h='';relayCfg."
-"forEach((r,i)=>{let optional=i>=3;h+=`<div class='relay-config-item'><div class='relay-config-head'><div><div class='rel"
-"ay-number'>Relay ${i+1}</div><div class='relay-gpio'>Relay GPIO ${r.gpio}${optional?' · Optional':''}</div><div class='r"
-"elay-switch-gpio'>Physical Switch GPIO ${r.switchGpio}</div></div>${optional?`<label class='small-switch'><input type='c"
-"heckbox' id='en${i}' ${r.enabled?'checked':''} onchange='relayEnableChanged(${i})'><span class='small-slider'></span></l"
-"abel>`:''}</div><label class='field'>Name</label><input type='text' id='rn${i}' maxlength='31' value='${esc(r.name)}' ${"
-"optional&&!r.enabled?'disabled':''}></div>`});document.getElementById('relayConfigList').innerHTML=h}\nfunction relayEnab"
-"leChanged(i){let en=document.getElementById('en'+i).checked;document.getElementById('rn'+i).disabled=!en}\nasync function"
-" saveRelayConfig(){let m=document.getElementById('relaymsg');let body={};for(let i=0;i<5;i++){let enabled=i<3?true:docum"
-"ent.getElementById('en'+i).checked;let name=document.getElementById('rn'+i).value.trim();if(!name)name='Relay '+(i+1);if"
-"(name.length>31){m.textContent='Relay name is too long.';return}body['r'+(i+1)+'_enabled']=enabled;body['r'+(i+1)+'_name"
-"']=name}m.textContent='Saving...';try{let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'applicatio"
-"n/json'},body:JSON.stringify(body)});let d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'save failed"
-"');relayCfg=d.config||relayCfg;m.textContent='Saved successfully.';renderRelayConfig();await load()}catch(e){m.textConte"
-"nt='Could not save relay configuration: '+(e.message||'request failed')}}\nasync function saveSettings(){let s=document.g"
-"etElementById('ssid').value,p=document.getElementById('pass').value,m=document.getElementById('setmsg');if(s.length<1||s"
-".length>32||p.length<8||p.length>63){m.textContent='Invalid SSID or password.';return}m.textContent='Saving and restarti"
-"ng...';try{let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.string"
-"ify({ssid:s,password:p})});if(!r.ok)throw 0}catch(e){m.textContent='Connection lost. The AP may be restarting.'}}\nasync "
-"function loadSettings(){try{let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();document.getElementBy"
-"Id('ssid').value=d.ssid||''}catch(e){}}\n\nfunction setOtaProgress(p){p=Math.max(0,Math.min(100,p));document.getElementByI"
-"d('otaProgress').classList.remove('hidden');document.getElementById('otaFill').style.width=p+'%';document.getElementById"
-"('otaPercent').textContent=Math.round(p)+'%'}\nfunction uploadFirmware(){let f=document.getElementById('fw').files[0],m=d"
-"ocument.getElementById('otamsg'),btn=document.getElementById('uploadBtn');if(!f){m.textContent='Select a .bin file first"
-".';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device w"
-"ill restart after a successful update.'))return;let otaPassword=prompt('Enter OTA update password:');if(otaPassword===nu"
-"ll)return;if(!otaPassword){m.textContent='OTA password is required.';return}btn.disabled=true;m.textContent='Uploading.."
-". Do not disconnect.';setOtaProgress(0);let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);xhr.setRequestHead"
-"er('Content-Type','application/octet-stream');xhr.setRequestHeader('X-OTA-Password',otaPassword);xhr.upload.onprogress=f"
-"unction(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};xhr.onl"
-"oad=function(){if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. "
-"Restarting...';setTimeout(()=>location.reload(),8000)}else{btn.disabled=false;m.textContent='OTA failed. Current firmwar"
-"e should remain active.'}};xhr.onerror=function(){if(document.getElementById('otaPercent').textContent==='100%'){m.textC"
-"ontent='Firmware uploaded. Device may be restarting...'}else{btn.disabled=false;m.textContent='Upload interrupted. Curre"
-"nt firmware should remain active.'}};xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'}"
-";xhr.send(f)}\nload();loadSettings();setInterval(load,500);\n</script></body></html>";
+"<!doctype html>\n"
+"<html lang=\"en\">\n"
+"<head>\n"
+"<meta charset=\"utf-8\">\n"
+"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">\n"
+"<meta name=\"theme-color\" content=\"#111827\">\n"
+"<title>ESP32 Smart Home</title>\n"
+"<style>\n"
+":root{--bg:#f3f5f7;--card:#fff;--text:#17202a;--muted:#697586;--line:#e5e7eb;--on:#168a4b;--accent:#2563eb;--danger:#b42318}\n"
+"*{box-sizing:border-box}\n"
+"html,body{margin:0;min-height:100%;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text)}\n"
+"body{overflow-x:hidden}\n"
+".wrap{width:min(680px,100%);margin:auto;padding:18px 14px 34px;transition:filter .34s ease,transform .34s ease}\n"
+".top{padding:8px 4px 18px}\n"
+".topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}\n"
+"h1{font-size:25px;margin:0 0 5px}.sub{color:var(--muted);font-size:14px}\n"
+".settings-btn{width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;box-shadow:0 2px 8px rgba(15,23,42,.06)}\n"
+".settings-btn:active{transform:scale(.96)}\n"
+".card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 2px 10px rgba(15,23,42,.04)}\n"
+".row{display:flex;align-items:center;justify-content:space-between;gap:15px}\n"
+".name{font-weight:650;font-size:17px}.state{font-size:13px;color:var(--muted);margin-top:4px}\n"
+".switch{position:relative;width:58px;height:32px;flex:none}.switch input{opacity:0;width:0;height:0}\n"
+".slider{position:absolute;inset:0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}\n"
+".slider:before{content:'';position:absolute;width:26px;height:26px;left:3px;top:3px;background:white;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}\n"
+"input:checked+.slider{background:var(--on)}input:checked+.slider:before{transform:translateX(26px)}\n"
+"button{border:1px solid var(--line);background:#fff;border-radius:10px;padding:10px 13px;font:inherit;cursor:pointer}\n"
+"button.primary{background:var(--accent);border-color:var(--accent);color:#fff}\n"
+"button:disabled{opacity:.55;cursor:not-allowed}\n"
+".msg{font-size:13px;margin-top:10px;color:var(--muted)}\n"
+"input[type=text],input[type=password],input[type=file]{width:100%;padding:11px;border:1px solid #d5dae0;border-radius:10px;background:#fff;font:inherit}\n"
+"label.field{display:block;font-size:13px;color:var(--muted);margin:13px 0 6px}\n"
+".hidden{display:none!important}\n"
+".status{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}\n"
+".dot{width:8px;height:8px;border-radius:50%;background:var(--on)}\n"
+".progress-wrap{margin-top:14px}.progress-head{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-bottom:6px}\n"
+".progress{height:8px;background:#e8ebef;border-radius:20px;overflow:hidden}.progress-fill{height:100%;width:0;background:var(--accent);transition:width .12s ease}\n"
+".relay-config{margin-top:10px}.relay-config-item{padding:14px 0;border-top:1px solid var(--line)}\n"
+".relay-config-item:first-child{border-top:0}.relay-config-head{display:flex;align-items:center;justify-content:space-between;gap:12px}\n"
+".small-switch{position:relative;width:48px;height:27px;flex:none}.small-switch input{opacity:0;width:0;height:0}\n"
+".small-slider{position:absolute;inset:0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}\n"
+".small-slider:before{content:'';position:absolute;width:21px;height:21px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}\n"
+".small-switch input:checked+.small-slider{background:var(--on)}.small-switch input:checked+.small-slider:before{transform:translateX(21px)}\n"
+".relay-number{font-weight:650;font-size:15px}.relay-gpio,.relay-switch-gpio{font-size:12px;color:var(--muted);margin-top:3px}\n"
+".bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}\n"
+".setting-list{margin-top:14px}\n"
+".setting-item{display:flex;align-items:center;gap:14px;padding:15px 2px;border-top:1px solid var(--line);cursor:pointer}\n"
+".setting-item:first-child{border-top:0}\n"
+".setting-item:active{opacity:.72}\n"
+".setting-icon{width:40px;height:40px;border-radius:12px;background:#f1f4f8;display:flex;align-items:center;justify-content:center;font-size:19px;flex:none}\n"
+".setting-title{font-weight:650;font-size:15px}.setting-desc{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.4}\n"
+".chevron{margin-left:auto;color:#8993a1;font-size:22px}\n"
+".back-row{margin-top:20px;text-align:center}.back-btn{min-width:180px}\n"
+".drawer-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.34);opacity:0;pointer-events:none;transition:opacity .34s ease;z-index:90}\n"
+".settings-drawer{position:fixed;z-index:100;top:0;right:0;width:min(680px,100%);height:100dvh;background:var(--bg);box-shadow:-12px 0 35px rgba(15,23,42,.18);transform:translateX(105%);transition:transform .38s cubic-bezier(.22,.8,.2,1);overflow-y:auto;overscroll-behavior:contain}\n"
+".settings-drawer.open{transform:translateX(0)}\n"
+".drawer-backdrop.open{opacity:1;pointer-events:auto}\n"
+"body.settings-open .wrap{filter:brightness(.86)}\n"
+".drawer-inner{min-height:100%;padding:18px 14px 34px}\n"
+".drawer-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 4px 18px}\n"
+".drawer-title{font-size:25px;font-weight:700}.drawer-sub{font-size:14px;color:var(--muted);margin-top:4px}\n"
+".icon-btn{width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer}\n"
+".subpage{display:none;animation:pageIn .25s ease both}.subpage.active{display:block}\n"
+"@keyframes pageIn{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}\n"
+".page-title{font-size:22px;font-weight:700;margin:0}.page-sub{font-size:13px;color:var(--muted);margin-top:4px}\n"
+".page-head{display:flex;align-items:center;gap:10px;margin-bottom:18px}\n"
+".page-head .icon-btn{flex:none}\n"
+".info-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:12px 0}\n"
+"@media (prefers-reduced-motion:reduce){.settings-drawer,.drawer-backdrop,.wrap{transition:none}.subpage{animation:none}}\n"
+"</style>\n"
+"</head>\n"
+"<body>\n"
+"<main class=\"wrap\">\n"
+"<header class=\"top\"><div class=\"topbar\">\n"
+"<div><h1>Smart Home</h1><div class=\"sub\">Local offline control</div></div>\n"
+"<button class=\"settings-btn\" onclick=\"openSettings()\" aria-label=\"Settings\" title=\"Settings\">⚙</button>\n"
+"</div></header>\n"
+"<section id=\"controls\"></section>\n"
+"<div class=\"status\"><span class=\"dot\"></span> ESP32 local AP</div>\n"
+"</main>\n"
+"\n"
+"<div id=\"drawerBackdrop\" class=\"drawer-backdrop\" onclick=\"closeSettings()\"></div>\n"
+"<aside id=\"settingsDrawer\" class=\"settings-drawer\" aria-hidden=\"true\">\n"
+"<div class=\"drawer-inner\">\n"
+"\n"
+"<section id=\"settingsHome\" class=\"subpage active\">\n"
+"<header class=\"drawer-top\">\n"
+"<div><div class=\"drawer-title\">Settings</div><div class=\"drawer-sub\">Device configuration</div></div>\n"
+"<button class=\"icon-btn\" onclick=\"closeSettings()\" aria-label=\"Close settings\">✕</button>\n"
+"</header>\n"
+"<div class=\"card setting-list\">\n"
+"<div class=\"setting-item\" onclick=\"openSubPage('otaPage')\">\n"
+"<div class=\"setting-icon\">↻</div><div><div class=\"setting-title\">OTA Update</div><div class=\"setting-desc\">Update firmware locally from a .bin file</div></div><div class=\"chevron\">›</div>\n"
+"</div>\n"
+"<div class=\"setting-item\" onclick=\"openSubPage('otaPasswordPage')\">\n"
+"<div class=\"setting-icon\">🔐</div><div><div class=\"setting-title\">OTA Password</div><div class=\"setting-desc\">Change the password required for firmware updates</div></div><div class=\"chevron\">›</div>\n"
+"</div>\n"
+"<div class=\"setting-item\" onclick=\"openSubPage('relayPage')\">\n"
+"<div class=\"setting-icon\">⚡</div><div><div class=\"setting-title\">Relay Configuration</div><div class=\"setting-desc\">Enable Relay 4/5 and rename any relay</div></div><div class=\"chevron\">›</div>\n"
+"</div>\n"
+"<div class=\"setting-item\" onclick=\"openSubPage('apPage')\">\n"
+"<div class=\"setting-icon\">📶</div><div><div class=\"setting-title\">AP Configuration</div><div class=\"setting-desc\">Change the ESP32 local Wi-Fi SSID and password</div></div><div class=\"chevron\">›</div>\n"
+"</div>\n"
+"</div>\n"
+"</section>\n"
+"\n"
+"<section id=\"otaPage\" class=\"subpage\">\n"
+"<div class=\"page-head\"><button class=\"icon-btn\" onclick=\"backToSettings()\" aria-label=\"Back\">←</button><div><div class=\"page-title\">OTA Update</div><div class=\"page-sub\">Local firmware update</div></div></div>\n"
+"<div class=\"info-card\">\n"
+"<label class=\"field\">Firmware .bin</label><input id=\"fw\" type=\"file\" accept=\".bin,application/octet-stream\">\n"
+"<div class=\"bar\"><button id=\"uploadBtn\" class=\"primary\" onclick=\"uploadFirmware()\">Upload & Restart</button></div>\n"
+"<div id=\"otaProgress\" class=\"progress-wrap hidden\">\n"
+"<div class=\"progress-head\"><span id=\"otaProgressText\">Uploading...</span><span id=\"otaPercent\">0%</span></div>\n"
+"<div class=\"progress\"><div id=\"otaFill\" class=\"progress-fill\"></div></div></div>\n"
+"<div id=\"otamsg\" class=\"msg\"></div>\n"
+"</div>\n"
+"<div class=\"back-row\"><button class=\"back-btn\" onclick=\"backToSettings()\">← Back to Settings</button></div>\n"
+"</section>\n"
+"\n"
+"<section id=\"otaPasswordPage\" class=\"subpage\">\n"
+"<div class=\"page-head\"><button class=\"icon-btn\" onclick=\"backToSettings()\" aria-label=\"Back\">←</button><div><div class=\"page-title\">OTA Password</div><div class=\"page-sub\">Change the password used for OTA updates</div></div></div>\n"
+"<div class=\"info-card\">\n"
+"<label class=\"field\">Old password</label><input id=\"oldOtaPass\" type=\"password\" maxlength=\"63\" autocomplete=\"current-password\">\n"
+"<label class=\"field\">New password</label><input id=\"newOtaPass\" type=\"password\" maxlength=\"63\" autocomplete=\"new-password\">\n"
+"<label class=\"field\">Confirm new password</label><input id=\"confirmOtaPass\" type=\"password\" maxlength=\"63\" autocomplete=\"new-password\">\n"
+"<div class=\"bar\"><button class=\"primary\" id=\"otaPassBtn\" onclick=\"saveOtaPassword()\">Save OTA Password</button></div>\n"
+"<div id=\"otaPassMsg\" class=\"msg\"></div>\n"
+"</div>\n"
+"<div class=\"back-row\"><button class=\"back-btn\" onclick=\"backToSettings()\">← Back to Settings</button></div>\n"
+"</section>\n"
+"\n"
+"<section id=\"relayPage\" class=\"subpage\">\n"
+"<div class=\"page-head\"><button class=\"icon-btn\" onclick=\"backToSettings()\" aria-label=\"Back\">←</button><div><div class=\"page-title\">Relay Configuration</div><div class=\"page-sub\">Relay 1-3 are fixed; Relay 4-5 are optional</div></div></div>\n"
+"<div class=\"info-card relay-config\"><div id=\"relayConfigList\"></div>\n"
+"<div class=\"bar\"><button class=\"primary\" onclick=\"saveRelayConfig()\">Save Relay Configuration</button></div>\n"
+"<div id=\"relaymsg\" class=\"msg\"></div></div>\n"
+"<div class=\"back-row\"><button class=\"back-btn\" onclick=\"backToSettings()\">← Back to Settings</button></div>\n"
+"</section>\n"
+"\n"
+"<section id=\"apPage\" class=\"subpage\">\n"
+"<div class=\"page-head\"><button class=\"icon-btn\" onclick=\"backToSettings()\" aria-label=\"Back\">←</button><div><div class=\"page-title\">AP Configuration</div><div class=\"page-sub\">Change the local ESP32 Wi-Fi settings</div></div></div>\n"
+"<div class=\"info-card\">\n"
+"<label class=\"field\">SSID</label><input id=\"ssid\" maxlength=\"32\">\n"
+"<label class=\"field\">Password (8-63 characters)</label><input id=\"pass\" type=\"password\" maxlength=\"63\" autocomplete=\"new-password\">\n"
+"<div class=\"bar\"><button class=\"primary\" onclick=\"saveSettings()\">Save & Restart</button></div>\n"
+"<div id=\"setmsg\" class=\"msg\"></div>\n"
+"</div>\n"
+"<div class=\"back-row\"><button class=\"back-btn\" onclick=\"backToSettings()\">← Back to Settings</button></div>\n"
+"</section>\n"
+"\n"
+"</div>\n"
+"</aside>\n"
+"\n"
+"<script>\n"
+"let relayCfg=[\n"
+"{enabled:true,name:'Living Room Light',gpio:16,switchGpio:32},\n"
+"{enabled:true,name:'Ceiling Fan',gpio:17,switchGpio:33},\n"
+"{enabled:true,name:'Charging Socket',gpio:18,switchGpio:25},\n"
+"{enabled:false,name:'Relay 4',gpio:19,switchGpio:26},\n"
+"{enabled:false,name:'Relay 5',gpio:21,switchGpio:27}\n"
+"];\n"
+"\n"
+"function esc(s){return String(s).replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\"':'&quot;'}[c]))}\n"
+"\n"
+"function render(a){\n"
+" let h='';\n"
+" a.forEach((v,i)=>{\n"
+"  if(!relayCfg[i]||!relayCfg[i].enabled)return;\n"
+"  h+=`<section class=\"card\"><div class=\"row\"><div><div class=\"name\">${esc(relayCfg[i].name)}</div><div class=\"state\" id=\"st${i}\">${v?'ON':'OFF'}</div></div><label class=\"switch\"><input type=\"checkbox\" id=\"r${i}\" ${v?'checked':''} onchange=\"setRelay(${i},this.checked)\"><span class=\"slider\"></span></label></div></section>`;\n"
+" });\n"
+" document.getElementById('controls').innerHTML=h;\n"
+"}\n"
+"\n"
+"async function load(){\n"
+" try{\n"
+"  let r=await fetch('/api/status',{cache:'no-store'});\n"
+"  if(!r.ok)throw 0;\n"
+"  let d=await r.json();\n"
+"  relayCfg=d.config||relayCfg;\n"
+"  render(d.states||[]);\n"
+" }catch(e){}\n"
+"}\n"
+"\n"
+"async function setRelay(i,on){\n"
+" let el=document.getElementById('r'+i);\n"
+" if(!el)return;\n"
+" el.disabled=true;\n"
+" try{\n"
+"  let r=await fetch(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});\n"
+"  if(!r.ok)throw 0;\n"
+"  await load();\n"
+" }catch(e){\n"
+"  el.checked=!on;\n"
+"  alert('Relay command failed.');\n"
+" }finally{el.disabled=false}\n"
+"}\n"
+"\n"
+"function openSettings(){\n"
+" document.body.classList.add('settings-open');\n"
+" document.getElementById('drawerBackdrop').classList.add('open');\n"
+" document.getElementById('settingsDrawer').classList.add('open');\n"
+" document.getElementById('settingsDrawer').setAttribute('aria-hidden','false');\n"
+" showSettingsHome();\n"
+"}\n"
+"\n"
+"function closeSettings(){\n"
+" let d=document.getElementById('settingsDrawer');\n"
+" d.classList.remove('open');\n"
+" document.getElementById('drawerBackdrop').classList.remove('open');\n"
+" document.body.classList.remove('settings-open');\n"
+" d.setAttribute('aria-hidden','true');\n"
+" setTimeout(showSettingsHome,380);\n"
+"}\n"
+"\n"
+"function showSettingsHome(){\n"
+" document.querySelectorAll('.subpage').forEach(p=>p.classList.remove('active'));\n"
+" document.getElementById('settingsHome').classList.add('active');\n"
+"}\n"
+"\n"
+"function openSubPage(id){\n"
+" document.querySelectorAll('.subpage').forEach(p=>p.classList.remove('active'));\n"
+" document.getElementById(id).classList.add('active');\n"
+" if(id==='relayPage')renderRelayConfig();\n"
+" if(id==='apPage')loadSettings();\n"
+"}\n"
+"\n"
+"function backToSettings(){\n"
+" showSettingsHome();\n"
+"}\n"
+"\n"
+"function renderRelayConfig(){\n"
+" let h='';\n"
+" relayCfg.forEach((r,i)=>{\n"
+"  let optional=i>=3;\n"
+"  h+=`<div class=\"relay-config-item\"><div class=\"relay-config-head\"><div><div class=\"relay-number\">Relay ${i+1}</div><div class=\"relay-gpio\">Relay GPIO ${r.gpio}${optional?' · Optional':''}</div><div class=\"relay-switch-gpio\">Physical Switch GPIO ${r.switchGpio}</div></div>${optional?`<label class=\"small-switch\"><input type=\"checkbox\" id=\"en${i}\" ${r.enabled?'checked':''} onchange=\"relayEnableChanged(${i})\"><span class=\"small-slider\"></span></label>`:''}</div><label class=\"field\">Name</label><input type=\"text\" id=\"rn${i}\" maxlength=\"31\" value=\"${esc(r.name)}\" ${optional&&!r.enabled?'disabled':''}></div>`;\n"
+" });\n"
+" document.getElementById('relayConfigList').innerHTML=h;\n"
+"}\n"
+"\n"
+"function relayEnableChanged(i){\n"
+" let en=document.getElementById('en'+i).checked;\n"
+" document.getElementById('rn'+i).disabled=!en;\n"
+"}\n"
+"\n"
+"async function saveRelayConfig(){\n"
+" let m=document.getElementById('relaymsg'),body={};\n"
+" for(let i=0;i<5;i++){\n"
+"  let enabled=i<3?true:document.getElementById('en'+i).checked;\n"
+"  let name=document.getElementById('rn'+i).value.trim();\n"
+"  if(!name)name='Relay '+(i+1);\n"
+"  if(name.length>31){m.textContent='Relay name is too long.';return}\n"
+"  body['r'+(i+1)+'_enabled']=enabled;\n"
+"  body['r'+(i+1)+'_name']=name;\n"
+" }\n"
+" m.textContent='Saving...';\n"
+" try{\n"
+"  let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});\n"
+"  let d=await r.json().catch(()=>({}));\n"
+"  if(!r.ok)throw new Error(d.error||'save failed');\n"
+"  relayCfg=d.config||relayCfg;\n"
+"  m.textContent='Saved successfully.';\n"
+"  renderRelayConfig();\n"
+"  await load();\n"
+" }catch(e){m.textContent='Could not save relay configuration: '+(e.message||'request failed')}\n"
+"}\n"
+"\n"
+"async function saveSettings(){\n"
+" let ssid=document.getElementById('ssid').value,pass=document.getElementById('pass').value,m=document.getElementById('setmsg');\n"
+" if(ssid.length<1||ssid.length>32||pass.length<8||pass.length>63){m.textContent='Invalid SSID or password.';return}\n"
+" m.textContent='Saving and restarting...';\n"
+" try{\n"
+"  let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ssid,password:pass})});\n"
+"  if(!r.ok)throw 0;\n"
+" }catch(e){m.textContent='Connection lost. The AP may be restarting.'}\n"
+"}\n"
+"\n"
+"async function loadSettings(){\n"
+" try{\n"
+"  let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();\n"
+"  document.getElementById('ssid').value=d.ssid||'';\n"
+" }catch(e){}\n"
+"}\n"
+"\n"
+"async function saveOtaPassword(){\n"
+" let oldPass=document.getElementById('oldOtaPass').value;\n"
+" let newPass=document.getElementById('newOtaPass').value;\n"
+" let confirmPass=document.getElementById('confirmOtaPass').value;\n"
+" let msg=document.getElementById('otaPassMsg');\n"
+" let btn=document.getElementById('otaPassBtn');\n"
+" if(oldPass.length<8||newPass.length<8||confirmPass.length<8||oldPass.length>63||newPass.length>63||confirmPass.length>63){\n"
+"  msg.textContent='All passwords must be 8-63 characters.';return;\n"
+" }\n"
+" if(newPass!==confirmPass){msg.textContent='New passwords do not match.';return}\n"
+" if(oldPass===newPass){msg.textContent='New password must be different from the old password.';return}\n"
+" btn.disabled=true;msg.textContent='Saving...';\n"
+" try{\n"
+"  let r=await fetch('/api/ota-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPassword:oldPass,newPassword:newPass,confirmPassword:confirmPass})});\n"
+"  let d=await r.json().catch(()=>({}));\n"
+"  if(!r.ok)throw new Error(d.error||'Could not change OTA password.');\n"
+"  msg.textContent='OTA password changed successfully.';\n"
+"  document.getElementById('oldOtaPass').value='';\n"
+"  document.getElementById('newOtaPass').value='';\n"
+"  document.getElementById('confirmOtaPass').value='';\n"
+" }catch(e){msg.textContent=e.message||'Could not change OTA password.'}\n"
+" finally{btn.disabled=false}\n"
+"}\n"
+"\n"
+"function setOtaProgress(p){\n"
+" p=Math.max(0,Math.min(100,p));\n"
+" document.getElementById('otaProgress').classList.remove('hidden');\n"
+" document.getElementById('otaFill').style.width=p+'%';\n"
+" document.getElementById('otaPercent').textContent=Math.round(p)+'%';\n"
+"}\n"
+"\n"
+"function uploadFirmware(){\n"
+" let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg'),btn=document.getElementById('uploadBtn');\n"
+" if(!f){m.textContent='Select a .bin file first.';return}\n"
+" if(f.size<1024){m.textContent='Firmware file is too small.';return}\n"
+" if(!confirm('Start OTA update? The device will restart after a successful update.'))return;\n"
+" let otaPassword=prompt('Enter OTA update password:');\n"
+" if(otaPassword===null)return;\n"
+" if(!otaPassword){m.textContent='OTA password is required.';return}\n"
+" btn.disabled=true;m.textContent='Uploading... Do not disconnect.';setOtaProgress(0);\n"
+" let xhr=new XMLHttpRequest();\n"
+" xhr.open('POST','/api/ota',true);\n"
+" xhr.setRequestHeader('Content-Type','application/octet-stream');\n"
+" xhr.setRequestHeader('X-OTA-Password',otaPassword);\n"
+" xhr.upload.onprogress=function(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};\n"
+" xhr.onload=function(){\n"
+"  if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. Restarting...';setTimeout(()=>location.reload(),8000)}\n"
+"  else{btn.disabled=false;m.textContent='OTA failed. Current firmware should remain active.'}\n"
+" };\n"
+" xhr.onerror=function(){btn.disabled=false;m.textContent='Upload interrupted. Current firmware should remain active.'};\n"
+" xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'};\n"
+" xhr.send(f);\n"
+"}\n"
+"\n"
+"load();\n"
+"loadSettings();\n"
+"setInterval(load,500);\n"
+"</script>\n"
+"</body>\n"
+"</html>\n";
+
 /* -------------------- NVS / persistence -------------------- */
 
 static bool valid_ssid(const char *s)
@@ -340,6 +552,12 @@ static void load_nvs(void)
         strlcpy(ap_password, tmp_pass, sizeof(ap_password));
     }
 
+    char tmp_ota_pass[MAX_OTA_PASS_LEN + 1] = {0};
+    sz = sizeof(tmp_ota_pass);
+    if (nvs_get_str(h, NVS_KEY_OTA_PASS, tmp_ota_pass, &sz) == ESP_OK && valid_password(tmp_ota_pass)) {
+        strlcpy(ota_password, tmp_ota_pass, sizeof(ota_password));
+    }
+
     nvs_close(h);
     ESP_LOGI(TAG, "Restored relay states: %d %d %d %d %d",
              relay_state[0], relay_state[1], relay_state[2], relay_state[3], relay_state[4]);
@@ -419,6 +637,24 @@ static esp_err_t save_ap_settings(const char *ssid, const char *password)
     if (err == ESP_OK) {
         strlcpy(ap_ssid, ssid, sizeof(ap_ssid));
         strlcpy(ap_password, password, sizeof(ap_password));
+    }
+    return err;
+}
+
+static esp_err_t save_ota_password(const char *password)
+{
+    xSemaphoreTake(storage_mutex, portMAX_DELAY);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_OTA_PASS, password);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    xSemaphoreGive(storage_mutex);
+
+    if (err == ESP_OK) {
+        strlcpy(ota_password, password, sizeof(ota_password));
     }
     return err;
 }
@@ -973,6 +1209,53 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
     return send_json(req, json, "200 OK");
 }
 
+static bool constant_time_equal(const char *a, const char *b);
+
+static esp_err_t ota_password_post_handler(httpd_req_t *req)
+{
+    if (ota_in_progress)
+        return send_json(req, "{\"error\":\"OTA in progress\"}", "409 Conflict");
+
+    if (req->content_len <= 0 || req->content_len > 1024)
+        return send_json(req, "{\"error\":\"invalid body\"}", "400 Bad Request");
+
+    char body[1025];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) return ESP_FAIL;
+        received += (size_t)n;
+    }
+    body[received] = '\0';
+
+    char old_pass[MAX_OTA_PASS_LEN + 1];
+    char new_pass[MAX_OTA_PASS_LEN + 1];
+    char confirm_pass[MAX_OTA_PASS_LEN + 1];
+
+    if (!json_extract_string(body, "oldPassword", old_pass, sizeof(old_pass)) ||
+        !json_extract_string(body, "newPassword", new_pass, sizeof(new_pass)) ||
+        !json_extract_string(body, "confirmPassword", confirm_pass, sizeof(confirm_pass))) {
+        return send_json(req, "{\"error\":\"all password fields are required\"}", "400 Bad Request");
+    }
+
+    if (!valid_password(old_pass) || !valid_password(new_pass) || !valid_password(confirm_pass))
+        return send_json(req, "{\"error\":\"password must be 8-63 characters\"}", "400 Bad Request");
+
+    if (!constant_time_equal(old_pass, ota_password))
+        return send_json(req, "{\"error\":\"old OTA password is incorrect\"}", "403 Forbidden");
+
+    if (!constant_time_equal(new_pass, confirm_pass))
+        return send_json(req, "{\"error\":\"new passwords do not match\"}", "400 Bad Request");
+
+    if (constant_time_equal(new_pass, ota_password))
+        return send_json(req, "{\"error\":\"new password must be different\"}", "400 Bad Request");
+
+    if (save_ota_password(new_pass) != ESP_OK)
+        return send_json(req, "{\"error\":\"could not save OTA password\"}", "500 Internal Server Error");
+
+    return send_json(req, "{\"ok\":true}", "200 OK");
+}
+
 /* -------------------- OTA -------------------- */
 
 static bool constant_time_equal(const char *a, const char *b)
@@ -996,9 +1279,9 @@ static esp_err_t ota_handler(httpd_req_t *req)
     if (pass_len == 0 || pass_len > MAX_AP_PASS_LEN) {
         return send_json(req, "{\"error\":\"OTA password required\"}", "401 Unauthorized");
     }
-    char ota_password[64];
-    if (httpd_req_get_hdr_value_str(req, "X-OTA-Password", ota_password, sizeof(ota_password)) != ESP_OK ||
-        !constant_time_equal(ota_password, OTA_UPDATE_PASSWORD)) {
+    char supplied_ota_password[64];
+    if (httpd_req_get_hdr_value_str(req, "X-OTA-Password", supplied_ota_password, sizeof(supplied_ota_password)) != ESP_OK ||
+        !constant_time_equal(supplied_ota_password, ota_password)) {
         return send_json(req, "{\"error\":\"invalid OTA password\"}", "403 Forbidden");
     }
 
@@ -1107,6 +1390,7 @@ static void start_http_server(void)
     httpd_uri_t settings_post = {.uri="/api/settings", .method=HTTP_POST, .handler=settings_post_handler};
     httpd_uri_t relay_config_post = {.uri="/api/relays", .method=HTTP_POST, .handler=relay_config_post_handler};
     httpd_uri_t ota = {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler};
+    httpd_uri_t ota_password = {.uri="/api/ota-password", .method=HTTP_POST, .handler=ota_password_post_handler};
 
     httpd_uri_t c1 = {.uri="/generate_204", .method=HTTP_GET, .handler=captive_handler};
     httpd_uri_t c2 = {.uri="/hotspot-detect.html", .method=HTTP_GET, .handler=captive_handler};
@@ -1122,6 +1406,7 @@ static void start_http_server(void)
     httpd_register_uri_handler(http_server, &settings_post);
     httpd_register_uri_handler(http_server, &relay_config_post);
     httpd_register_uri_handler(http_server, &ota);
+    httpd_register_uri_handler(http_server, &ota_password);
     httpd_register_uri_handler(http_server, &c1);
     httpd_register_uri_handler(http_server, &c2);
     httpd_register_uri_handler(http_server, &c3);

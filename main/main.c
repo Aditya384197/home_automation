@@ -39,6 +39,19 @@
 
 #define RELAY_COUNT             5
 
+/* Physical wall-switch inputs: connect one switch terminal to GND and the
+ * other terminal to the corresponding GPIO. Internal pull-ups are used, so
+ * an open switch reads HIGH and a closed switch reads LOW. */
+#define SWITCH1_GPIO            32
+#define SWITCH2_GPIO            33
+#define SWITCH3_GPIO            25
+#define SWITCH4_GPIO            26
+#define SWITCH5_GPIO            27
+#define SWITCH_COUNT            5
+#define SWITCH_ACTIVE_LEVEL     0
+#define SWITCH_DEBOUNCE_SAMPLES 3
+#define SWITCH_POLL_MS          20
+
 /* Change to 0 if your relay board is active-low. */
 #define RELAY_ACTIVE_LEVEL      1
 
@@ -89,6 +102,7 @@ static char ap_ssid[MAX_AP_SSID_LEN + 1] = DEFAULT_AP_SSID;
 static char ap_password[MAX_AP_PASS_LEN + 1] = DEFAULT_AP_PASSWORD;
 
 static TaskHandle_t dns_task_handle = NULL;
+static TaskHandle_t switch_task_handle = NULL;
 static volatile bool ota_in_progress = false;
 static httpd_handle_t http_server = NULL;
 
@@ -130,7 +144,7 @@ static const char *HTML_PAGE =
 ".small-slider{position:absolute;inset:0;background:#c8ced5;border-radius:40px;transition:.18s;cursor:pointer}"
 ".small-slider:before{content:'';position:absolute;width:21px;height:21px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0003;transition:.18s}"
 ".small-switch input:checked+.small-slider{background:var(--on)}.small-switch input:checked+.small-slider:before{transform:translateX(21px)}"
-".relay-number{font-weight:650;font-size:15px}.relay-gpio{font-size:12px;color:var(--muted);margin-top:3px}"
+".relay-number{font-weight:650;font-size:15px}.relay-gpio{font-size:12px;color:var(--muted);margin-top:3px}.relay-switch-gpio{font-size:12px;color:var(--muted);margin-top:2px}"
 "</style></head><body><main class='wrap'>"
 "<header class='top'><div class='topbar'>"
 "<div><h1>Smart Home</h1><div class='sub'>Local offline control</div></div>"
@@ -172,26 +186,26 @@ static const char *HTML_PAGE =
 "<div class='status'><span class='dot'></span> ESP32 local AP</div>"
 "</main><script>"
 "let relayCfg=["
-"{enabled:true,name:'Living Room Light',gpio:16},"
-"{enabled:true,name:'Ceiling Fan',gpio:17},"
-"{enabled:true,name:'Charging Socket',gpio:18},"
-"{enabled:false,name:'Relay 4',gpio:19},"
-"{enabled:false,name:'Relay 5',gpio:21}"
+"{enabled:true,name:'Living Room Light',gpio:16,switchGpio:32},"
+"{enabled:true,name:'Ceiling Fan',gpio:17,switchGpio:33},"
+"{enabled:true,name:'Charging Socket',gpio:18,switchGpio:25},"
+"{enabled:false,name:'Relay 4',gpio:19,switchGpio:26},"
+"{enabled:false,name:'Relay 5',gpio:21,switchGpio:27}"
 "];"
 "function esc(s){return String(s).replace(/[&<>'\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',\"'\":'&#39;','\\\"':'&quot;'}[c]))}"
 "function render(a){let h='';a.forEach((v,i)=>{if(!relayCfg[i]||!relayCfg[i].enabled)return;h+=`<section class='card'><div class='row'><div><div class='name'>${esc(relayCfg[i].name)}</div><div class='state' id='st${i}'>${v?'ON':'OFF'}</div></div><label class='switch'><input type='checkbox' id='r${i}' ${v?'checked':''} onchange='setRelay(${i},this.checked)'><span class='slider'></span></label></div></section>`});document.getElementById('controls').innerHTML=h}"
-"async function load(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;render(d.states||[])}catch(e){setTimeout(load,1200)}}"
+"async function load(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;let d=await r.json();relayCfg=d.config||relayCfg;render(d.states||[])}catch(e){}}"
 "async function setRelay(i,on){let el=document.getElementById('r'+i);if(!el)return;el.disabled=true;try{let r=await fetch(`/api/relay?relay=${i+1}&state=${on?1:0}`,{cache:'no-store'});if(!r.ok)throw 0;await load()}catch(e){el.checked=!on;alert('Relay command failed.')}finally{el.disabled=false}}"
 "function togglePanel(id){document.getElementById(id).classList.toggle('hidden')}"
 "function openRelayConfig(){document.getElementById('relayConfig').classList.remove('hidden');document.getElementById('relaymsg').textContent='';renderRelayConfig();}"
-"function renderRelayConfig(){let h='';relayCfg.forEach((r,i)=>{let optional=i>=3;h+=`<div class='relay-config-item'><div class='relay-config-head'><div><div class='relay-number'>Relay ${i+1}</div><div class='relay-gpio'>GPIO ${r.gpio}${optional?' · Optional':''}</div></div>${optional?`<label class='small-switch'><input type='checkbox' id='en${i}' ${r.enabled?'checked':''} onchange='relayEnableChanged(${i})'><span class='small-slider'></span></label>`:''}</div><label class='field'>Name</label><input type='text' id='rn${i}' maxlength='31' value='${esc(r.name)}' ${optional&&!r.enabled?'disabled':''}></div>`});document.getElementById('relayConfigList').innerHTML=h}"
+"function renderRelayConfig(){let h='';relayCfg.forEach((r,i)=>{let optional=i>=3;h+=`<div class='relay-config-item'><div class='relay-config-head'><div><div class='relay-number'>Relay ${i+1}</div><div class='relay-gpio'>Relay GPIO ${r.gpio}${optional?' · Optional':''}</div><div class='relay-switch-gpio'>Physical Switch GPIO ${r.switchGpio}</div></div>${optional?`<label class='small-switch'><input type='checkbox' id='en${i}' ${r.enabled?'checked':''} onchange='relayEnableChanged(${i})'><span class='small-slider'></span></label>`:''}</div><label class='field'>Name</label><input type='text' id='rn${i}' maxlength='31' value='${esc(r.name)}' ${optional&&!r.enabled?'disabled':''}></div>`});document.getElementById('relayConfigList').innerHTML=h}"
 "function relayEnableChanged(i){let en=document.getElementById('en'+i).checked;document.getElementById('rn'+i).disabled=!en}"
 "async function saveRelayConfig(){let m=document.getElementById('relaymsg');let body={};for(let i=0;i<5;i++){let enabled=i<3?true:document.getElementById('en'+i).checked;let name=document.getElementById('rn'+i).value.trim();if(!name)name='Relay '+(i+1);if(name.length>31){m.textContent='Relay name is too long.';return}body['r'+(i+1)+'_enabled']=enabled;body['r'+(i+1)+'_name']=name}m.textContent='Saving...';try{let r=await fetch('/api/relays',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'save failed');relayCfg=d.config||relayCfg;m.textContent='Saved successfully.';renderRelayConfig();await load()}catch(e){m.textContent='Could not save relay configuration: '+(e.message||'request failed')}}"
 "async function saveSettings(){let s=document.getElementById('ssid').value,p=document.getElementById('pass').value,m=document.getElementById('setmsg');if(s.length<1||s.length>32||p.length<8||p.length>63){m.textContent='Invalid SSID or password.';return}m.textContent='Saving and restarting...';try{let r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})});if(!r.ok)throw 0}catch(e){m.textContent='Connection lost. The AP may be restarting.'}}"
 "async function loadSettings(){try{let r=await fetch('/api/settings',{cache:'no-store'}),d=await r.json();document.getElementById('ssid').value=d.ssid||''}catch(e){}}"
 "function setOtaProgress(p){p=Math.max(0,Math.min(100,p));document.getElementById('otaProgress').classList.remove('hidden');document.getElementById('otaFill').style.width=p+'%';document.getElementById('otaPercent').textContent=Math.round(p)+'%'}"
 "function uploadFirmware(){let f=document.getElementById('fw').files[0],m=document.getElementById('otamsg'),btn=document.getElementById('uploadBtn');if(!f){m.textContent='Select a .bin file first.';return}if(f.size<1024){m.textContent='Firmware file is too small.';return}if(!confirm('Start OTA update? The device will restart after a successful update.'))return;let otaPassword=prompt('Enter OTA update password:');if(otaPassword===null)return;if(!otaPassword){m.textContent='OTA password is required.';return}btn.disabled=true;m.textContent='Uploading... Do not disconnect.';setOtaProgress(0);let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);xhr.setRequestHeader('Content-Type','application/octet-stream');xhr.setRequestHeader('X-OTA-Password',otaPassword);xhr.upload.onprogress=function(e){if(e.lengthComputable){setOtaProgress((e.loaded/e.total)*100);m.textContent='Uploading firmware...'}};xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){setOtaProgress(100);m.textContent=xhr.responseText||'OTA successful. Restarting...';setTimeout(()=>location.reload(),8000)}else{btn.disabled=false;m.textContent='OTA failed. Current firmware should remain active.'}};xhr.onerror=function(){if(document.getElementById('otaPercent').textContent==='100%'){m.textContent='Firmware uploaded. Device may be restarting...'}else{btn.disabled=false;m.textContent='Upload interrupted. Current firmware should remain active.'}};xhr.ontimeout=function(){btn.disabled=false;m.textContent='OTA request timed out.'};xhr.send(f)}"
-"load();loadSettings();"
+"load();loadSettings();setInterval(load,500);"
 "</script></body></html>";
 
 /* -------------------- NVS / persistence -------------------- */
@@ -211,7 +225,14 @@ static bool valid_password(const char *s)
 static bool valid_relay_name(const char *s)
 {
     size_t n = strnlen(s, MAX_RELAY_NAME_LEN + 1);
-    return n >= 1 && n <= MAX_RELAY_NAME_LEN;
+    if (n < 1 || n > MAX_RELAY_NAME_LEN) return false;
+
+    /* Reject ASCII control characters while still allowing UTF-8 names. */
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == 0x7F) return false;
+    }
+    return true;
 }
 
 static void load_defaults(void)
@@ -315,21 +336,33 @@ static esp_err_t save_relay_states(void)
 static esp_err_t save_relay_config(void)
 {
     uint8_t enabled[RELAY_COUNT];
+    uint8_t states[RELAY_COUNT];
+    char names[RELAY_COUNT][MAX_RELAY_NAME_LEN + 1];
 
+    /* Serialize the complete relay configuration/state snapshot. The relay
+     * mutex stays held until the NVS transaction has committed, so a physical
+     * switch or web command cannot change relay_state between the snapshot and
+     * the configuration write. No other path takes storage_mutex and then
+     * relay_mutex, so this lock order is safe. */
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
-    for (int i = 0; i < RELAY_COUNT; ++i) enabled[i] = relay_enabled[i] ? 1 : 0;
-    xSemaphoreGive(relay_mutex);
+    for (int i = 0; i < RELAY_COUNT; ++i) {
+        enabled[i] = relay_enabled[i] ? 1 : 0;
+        states[i] = relay_state[i] ? 1 : 0;
+    }
+    memcpy(names, relay_name, sizeof(names));
 
     xSemaphoreTake(storage_mutex, portMAX_DELAY);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err == ESP_OK) {
         err = nvs_set_blob(h, NVS_KEY_RELAY_ENABLED, enabled, sizeof(enabled));
-        if (err == ESP_OK) err = nvs_set_blob(h, NVS_KEY_RELAY_NAMES, relay_name, sizeof(relay_name));
+        if (err == ESP_OK) err = nvs_set_blob(h, NVS_KEY_RELAY_NAMES, names, sizeof(names));
+        if (err == ESP_OK) err = nvs_set_blob(h, NVS_KEY_RELAY_STATES, states, sizeof(states));
         if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
     xSemaphoreGive(storage_mutex);
+    xSemaphoreGive(relay_mutex);
 
     if (err != ESP_OK) ESP_LOGE(TAG, "Relay config NVS save failed: %s", esp_err_to_name(err));
     return err;
@@ -406,6 +439,98 @@ static void init_relays(void)
     }
 }
 
+/* -------------------- Physical wall switches -------------------- */
+
+static gpio_num_t switch_gpio(int index)
+{
+    static const gpio_num_t pins[SWITCH_COUNT] = {
+        SWITCH1_GPIO, SWITCH2_GPIO, SWITCH3_GPIO, SWITCH4_GPIO, SWITCH5_GPIO
+    };
+    return pins[index];
+}
+
+static bool read_switch_state(int index)
+{
+    return gpio_get_level(switch_gpio(index)) == SWITCH_ACTIVE_LEVEL;
+}
+
+static void init_switches(void)
+{
+    uint64_t mask = 0;
+    for (int i = 0; i < SWITCH_COUNT; ++i) mask |= (1ULL << switch_gpio(i));
+
+    gpio_config_t io = {
+        .pin_bit_mask = mask,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+}
+
+static void apply_switch_command(int index, bool on)
+{
+    bool changed = false;
+
+    xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    if (relay_enabled[index] && relay_state[index] != (int)on) {
+        relay_state[index] = on ? 1 : 0;
+        gpio_set_level(relay_gpio(index), relay_output_level(on ? 1 : 0));
+        changed = true;
+    }
+    xSemaphoreGive(relay_mutex);
+
+    if (changed) {
+        /* Persist physical-switch changes so the last known state survives a
+         * power cycle. NVS handles wear-leveling internally. */
+        if (save_relay_states() != ESP_OK) {
+            ESP_LOGE(TAG, "Physical switch state save failed for relay %d", index + 1);
+        }
+    }
+}
+
+static void physical_switch_task(void *arg)
+{
+    int last_raw[SWITCH_COUNT];
+    int stable[SWITCH_COUNT];
+    uint8_t samples[SWITCH_COUNT] = {0};
+
+    esp_task_wdt_add(NULL);
+
+    for (int i = 0; i < SWITCH_COUNT; ++i) {
+        last_raw[i] = gpio_get_level(switch_gpio(i));
+        /* Establish a boot baseline without generating a relay command.
+         * This preserves the NVS-restored relay state across power cycles.
+         * A later physical transition is what changes the relay. */
+        stable[i] = last_raw[i];
+        samples[i] = SWITCH_DEBOUNCE_SAMPLES;
+    }
+
+    while (1) {
+        for (int i = 0; i < SWITCH_COUNT; ++i) {
+            int raw = gpio_get_level(switch_gpio(i));
+
+            if (raw == last_raw[i]) {
+                if (samples[i] < SWITCH_DEBOUNCE_SAMPLES) samples[i]++;
+            } else {
+                last_raw[i] = raw;
+                samples[i] = 0;
+            }
+
+            if (samples[i] >= SWITCH_DEBOUNCE_SAMPLES && stable[i] != raw) {
+                stable[i] = raw;
+                apply_switch_command(i, raw == SWITCH_ACTIVE_LEVEL);
+                ESP_LOGI(TAG, "Physical switch %d -> %s", i + 1,
+                         (raw == SWITCH_ACTIVE_LEVEL) ? "ON" : "OFF");
+            }
+        }
+
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(SWITCH_POLL_MS));
+    }
+}
+
 /* -------------------- Wi-Fi AP -------------------- */
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -427,9 +552,9 @@ static void wifi_init_ap(void)
 
     esp_netif_ip_info_t ip_info;
     ESP_ERROR_CHECK(esp_netif_get_ip_info(ap_netif, &ip_info));
-    ip4addr_aton(AP_IP_ADDR, &ip_info.ip);
-    ip4addr_aton(AP_GW_ADDR, &ip_info.gw);
-    ip4addr_aton(AP_NETMASK, &ip_info.netmask);
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(AP_IP_ADDR, &ip_info.ip));
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(AP_GW_ADDR, &ip_info.gw));
+    ESP_ERROR_CHECK(esp_netif_str_to_ip4(AP_NETMASK, &ip_info.netmask));
     ESP_ERROR_CHECK(esp_netif_dhcps_stop(ap_netif));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip_info));
     ESP_ERROR_CHECK(esp_netif_dhcps_start(ap_netif));
@@ -527,17 +652,22 @@ static void dns_task(void *arg)
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     ESP_LOGI(TAG, "Local DNS started on UDP/53");
+    esp_task_wdt_add(NULL);
 
     while (1) {
         struct sockaddr_in from;
         socklen_t from_len = sizeof(from);
         int n = recvfrom(sock, rx, sizeof(rx), 0, (struct sockaddr *)&from, &from_len);
-        if (n <= 0) continue;
+        if (n <= 0) {
+            esp_task_wdt_reset();
+            continue;
+        }
 
         int out_len = build_dns_answer(tx, sizeof(tx), rx, n);
         if (out_len > 0) {
             sendto(sock, tx, out_len, 0, (struct sockaddr *)&from, from_len);
         }
+        esp_task_wdt_reset();
     }
 }
 
@@ -586,10 +716,11 @@ static esp_err_t status_handler(httpd_req_t *req)
     pos += snprintf(json + pos, sizeof(json) - pos, "],\"config\":[");
     for (int i = 0; i < RELAY_COUNT; ++i) {
         pos += snprintf(json + pos, sizeof(json) - pos,
-                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d}%s",
+                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d,\"switchGpio\":%d}%s",
                         enabled[i] ? "true" : "false",
                         names[i],
                         (int)relay_gpio(i),
+                        (int)switch_gpio(i),
                         i == RELAY_COUNT - 1 ? "" : ",");
     }
     snprintf(json + pos, sizeof(json) - pos, "]}");
@@ -766,7 +897,9 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
         }
     }
 
+    bool old_enabled[RELAY_COUNT];
     xSemaphoreTake(relay_mutex, portMAX_DELAY);
+    memcpy(old_enabled, relay_enabled, sizeof(old_enabled));
     for (int i = 0; i < RELAY_COUNT; ++i) {
         relay_enabled[i] = new_enabled[i];
         strlcpy(relay_name[i], new_names[i], sizeof(relay_name[i]));
@@ -774,6 +907,12 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
         if (!relay_enabled[i]) {
             relay_state[i] = 0;
             gpio_set_level(relay_gpio(i), relay_output_level(0));
+        } else if (i >= 3 && !old_enabled[i]) {
+            /* When optional Relay 4/5 is enabled, immediately adopt the
+             * current corresponding physical switch position. */
+            bool on = read_switch_state(i);
+            relay_state[i] = on ? 1 : 0;
+            gpio_set_level(relay_gpio(i), relay_output_level(on ? 1 : 0));
         }
     }
     xSemaphoreGive(relay_mutex);
@@ -787,10 +926,11 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
     int pos = snprintf(json, sizeof(json), "{\"config\":[");
     for (int i = 0; i < RELAY_COUNT; ++i) {
         pos += snprintf(json + pos, sizeof(json) - pos,
-                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d}%s",
+                        "{\"enabled\":%s,\"name\":\"%s\",\"gpio\":%d,\"switchGpio\":%d}%s",
                         relay_enabled[i] ? "true" : "false",
                         relay_name[i],
                         (int)relay_gpio(i),
+                        (int)switch_gpio(i),
                         i == RELAY_COUNT - 1 ? "" : ",");
     }
     snprintf(json + pos, sizeof(json) - pos, "]}");
@@ -800,6 +940,21 @@ static esp_err_t relay_config_post_handler(httpd_req_t *req)
 
 /* -------------------- OTA -------------------- */
 
+static bool constant_time_equal(const char *a, const char *b)
+{
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    size_t n = la > lb ? la : lb;
+    unsigned char diff = (unsigned char)(la ^ lb);
+
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char ca = (i < la) ? (unsigned char)a[i] : 0;
+        unsigned char cb = (i < lb) ? (unsigned char)b[i] : 0;
+        diff |= (unsigned char)(ca ^ cb);
+    }
+    return diff == 0;
+}
+
 static esp_err_t ota_handler(httpd_req_t *req)
 {
     size_t pass_len = httpd_req_get_hdr_value_len(req, "X-OTA-Password");
@@ -808,7 +963,7 @@ static esp_err_t ota_handler(httpd_req_t *req)
     }
     char ota_password[64];
     if (httpd_req_get_hdr_value_str(req, "X-OTA-Password", ota_password, sizeof(ota_password)) != ESP_OK ||
-        strcmp(ota_password, OTA_UPDATE_PASSWORD) != 0) {
+        !constant_time_equal(ota_password, OTA_UPDATE_PASSWORD)) {
         return send_json(req, "{\"error\":\"invalid OTA password\"}", "403 Forbidden");
     }
 
@@ -942,18 +1097,6 @@ static void start_http_server(void)
     ESP_LOGI(TAG, "HTTP server ready");
 }
 
-/* -------------------- Watchdog -------------------- */
-
-static void watchdog_keepalive_task(void *arg)
-{
-    esp_task_wdt_add(NULL);
-
-    while (1) {
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-}
-
 /* -------------------- app_main -------------------- */
 
 void app_main(void)
@@ -975,8 +1118,10 @@ void app_main(void)
 
     load_nvs();
     init_relays();
+    init_switches();
     apply_all_relays();
 
+    /* Configure TWDT before creating tasks that register themselves with it. */
     esp_task_wdt_config_t wdt_config = {
         .timeout_ms = WATCHDOG_TIMEOUT_MS,
         .idle_core_mask = (1U << portNUM_PROCESSORS) - 1U,
@@ -987,7 +1132,10 @@ void app_main(void)
         ESP_ERROR_CHECK(ret);
     }
 
-    xTaskCreate(watchdog_keepalive_task, "wdt_keepalive", 2048, NULL, 1, NULL);
+    BaseType_t switch_ok = xTaskCreate(physical_switch_task, "physical_switches", 3072, NULL, 4, &switch_task_handle);
+    if (switch_ok != pdPASS) {
+        ESP_LOGE(TAG, "Physical switch task creation failed");
+    }
 
     wifi_init_ap();
 
